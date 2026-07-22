@@ -124,27 +124,79 @@ This adapter uses `pi-codex-conversion` internals until that package exposes a s
 
 The current package is validated with Pi 0.81.1 and `@howaboua/pi-codex-conversion` 2.2.16. Normal Pi `bash` guarding does not require Code Mode. Because the Code Mode adapter intentionally fails closed around private internals, test the guard after upgrading either package.
 
-## Optional approval notifications
+## Approval notifications and sound
 
-The package is silent by default and ships no audio files.
+The package is silent by default and ships no audio files. Configure attention mechanisms in `~/.pi/agent/infra-command-guard.json`:
 
-To play your own sound when a valid approval request reaches the TUI:
-
-```bash
-export PI_INFRA_COMMAND_GUARD_SOUND_PATH="$HOME/.config/pi/infra-approval.wav"
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/ramtinJ95/pi-infra-command-guard/main/infra-command-guard.schema.json",
+  "notifications": {
+    "enabled": true,
+    "backend": "auto"
+  },
+  "integrations": {
+    "herdr": {
+      "enabled": true
+    }
+  },
+  "sound": {
+    "enabled": false,
+    "path": null
+  }
+}
 ```
 
-Relative paths resolve from Pi's launch directory. The extension uses `afplay` on macOS, tries `paplay` then `aplay` on Linux, and supports WAV through PowerShell on Windows.
+When `PI_CODING_AGENT_DIR` overrides Pi's configuration directory, put `infra-command-guard.json` there instead. The extension reads the file for every approval request, so edits apply to the next popup without `/reload`.
 
-To show an OS-native notification using the system's configured alert behavior:
+### Notification backends
 
-```bash
-export PI_INFRA_COMMAND_GUARD_NATIVE_NOTIFICATION=1
+- `auto` (recommended): use native notifications on macOS and Windows; on Linux, prefer a recognized terminal notifier and fall back to `notify-send`
+- `terminal`: require Kitty OSC 99 or Ghostty OSC 9; unknown terminals produce a visible Pi warning
+- `native`: use Notification Center through `osascript` on macOS, `notify-send` on Linux, or a notification balloon on Windows
+
+Kitty notifications explicitly request silent delivery so custom sound remains separately controlled. Other terminal emulators and desktop notification services can still apply user-level notification policies.
+
+Terminal protocols cannot confirm that the OS displayed a notification after accepting the control sequence. Use `/infra-guard-notify-test` after configuring the extension. If terminal delivery is blocked by terminal or OS permissions, select `native` instead.
+
+### Herdr integration
+
+Herdr panes terminate application escape sequences inside Herdr's emulated terminal; raw Kitty or Ghostty notification sequences do not reach the outer terminal. When `integrations.herdr.enabled` is `true` (the default) and `HERDR_ENV=1`, `auto` uses native OS delivery instead of emitting unusable terminal sequences. Explicit `terminal` uses Herdr's notification broker:
+
+```toml
+[ui.toast]
+delivery = "terminal"
 ```
 
-Accepted opt-in values are `1`, `true`, `yes`, and `on`, case-insensitively. This uses Notification Center on macOS, `notify-send` on Linux, and a notification balloon plus system alert sound on Windows. Linux sound behavior depends on the desktop notification configuration.
+That setting belongs in Herdr's configuration. Herdr can also be configured for `system`, `herdr`, or `off`; infra-command-guard does not override it. Explicit `terminal` reports failure if Herdr does not show the request. Herdr currently reuses one Kitty notification identifier, so later terminal notifications can update an existing notification without showing a fresh banner. Use `auto` or `native` when reliable attention matters. Set `integrations.herdr.enabled` to `false` to disable all Herdr-specific routing.
 
-The options are independent and can be enabled together. Notification failures produce a Pi warning but never authorize or execute the blocked command.
+### Custom sound
+
+To play a user-supplied sound independently of the notification backend:
+
+```json
+{
+  "notifications": {
+    "enabled": true,
+    "backend": "auto"
+  },
+  "integrations": {
+    "herdr": {
+      "enabled": true
+    }
+  },
+  "sound": {
+    "enabled": true,
+    "path": "sounds/infra-approval.wav"
+  }
+}
+```
+
+`~` is expanded. Relative paths resolve from the directory containing `infra-command-guard.json`. The extension uses `afplay` on macOS, tries `paplay` then `aplay` on Linux, and supports WAV through PowerShell on Windows.
+
+Invalid JSON, unknown fields, unsupported backend values, and enabled sound without a path produce a Pi warning and disable attention mechanisms for that request. Notification and sound failures never authorize or execute the blocked command.
+
+Version 0.2.0 replaces the 0.1.x `PI_INFRA_COMMAND_GUARD_SOUND_PATH` and `PI_INFRA_COMMAND_GUARD_NATIVE_NOTIFICATION` environment variables with this JSON file.
 
 ## Notes
 
@@ -159,7 +211,7 @@ The options are independent and can be enabled together. Notification failures p
   - `j` / `k` move between `Cancel` and `Approve and run`
 - The model supplies structured fields rather than a markdown blob, so the UI avoids repeating command/reason/blast-radius text.
 - Because it overrides the built-in `bash` tool, pi may show the standard override warning in interactive mode.
-- No notification setting is required; both notification mechanisms are opt-in.
+- No notification setting is required; notifications and sound are opt-in.
 
 ## Reload
 
