@@ -1,0 +1,56 @@
+{
+  "name": "@ramtinj95/pi-infra-command-guard",
+  "version": "0.1.0",
+  "description": "Approval guard for risky infrastructure commands in Pi and GPT-5.6 Code Mode",
+  "type": "module",
+  "license": "MIT",
+  "author": "Ramtin Javanmardi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ramtinJ95/pi-infra-command-guard.git"
+  },
+  "homepage": "https://github.com/ramtinJ95/pi-infra-command-guard#readme",
+  "bugs": {
+    "url": "https://github.com/ramtinJ95/pi-infra-command-guard/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "infrastructure",
+    "kubectl",
+    "terraform",
+    "helm",
+    "argocd",
+    "approval"
+  ],
+  "files": [
+    "extensions/infra-command-guard/index.ts",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/infra-command-guard/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.81.1",
+    "@earendil-works/pi-tui": "^0.81.1",
+    "@types/node": "^24.0.0",
+    "typebox": "^1.1.38"
+  },
+  "scripts": {
+    "test": "bun extensions/infra-command-guard/index.test.ts",
+    "test:package": "npm pack --dry-run",
+    "check": "npm test && npm run test:package"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
