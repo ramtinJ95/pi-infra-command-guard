@@ -4,48 +4,18 @@ import { Type } from "typebox";
 import {
 	APPROVAL_STORE_KEY,
 	ApprovalStore,
-	executionFingerprint,
 	executionIdentity,
 	guardExecution,
 } from "./approvals.ts";
 import { requestInfraApproval } from "./approval-ui.ts";
-import {
-	autoNotificationBackend,
-	customSoundProcesses,
-	detectTerminalNotificationBackend,
-	isHerdrPane,
-	loadApprovalAttentionSettings,
-	nativeNotificationProcesses,
-	parseApprovalAttentionSettings,
-	parseHerdrNotificationOutput,
-	requestApprovalAttention,
-	sendTerminalNotification,
-	shouldUseNativeNotification,
-	terminalNotificationSequence,
-} from "./attention.ts";
+import { requestApprovalAttention } from "./attention.ts";
 import {
 	CODE_MODE_GUARD_BRIDGE_KEY,
-	CODE_MODE_PROVIDER_WRAPPED,
 	CODE_MODE_RUNTIME_KEY,
-	CODE_MODE_TOOL_WRAPPED,
-	codeModeProviders,
 	codeModeRuntime,
 	ensureCodeModeGuardInstalled,
 	type CodeModeGuardBridge,
 } from "./code-mode.ts";
-import {
-	collectPositionals,
-	evaluateArgocd,
-	evaluateCommand,
-	evaluateHelm,
-	evaluateKubectl,
-	evaluateTerraform,
-	extractInvocation,
-	hasDynamicExecutable,
-	isInteractiveInterpreterCommand,
-	isKubectlPortForwardOnlyCommand,
-	parseSimpleCommands,
-} from "./policy.ts";
 
 const CODE_MODE_PUBLIC_TOOL_NAMES = new Set(["exec", "wait", "functions.exec", "functions.wait"]);
 
@@ -222,39 +192,3 @@ export default function createExtension(pi: ExtensionAPI) {
 		if (events[APPROVAL_STORE_KEY] === approvals) delete events[APPROVAL_STORE_KEY];
 	});
 }
-
-export const _test = {
-	parseSimpleCommands,
-	extractInvocation,
-	collectPositionals,
-	isKubectlPortForwardOnlyCommand,
-	evaluateCommand,
-	evaluateKubectl,
-	evaluateTerraform,
-	evaluateHelm,
-	evaluateArgocd,
-	hasDynamicExecutable,
-	parseApprovalAttentionSettings,
-	loadApprovalAttentionSettings,
-	detectTerminalNotificationBackend,
-	autoNotificationBackend,
-	isHerdrPane,
-	shouldUseNativeNotification,
-	parseHerdrNotificationOutput,
-	terminalNotificationSequence,
-	sendTerminalNotification,
-	customSoundProcesses,
-	nativeNotificationProcesses,
-	isInteractiveInterpreterCommand,
-	executionFingerprint,
-	executionIdentity,
-	ApprovalStore,
-	guardExecution,
-	ensureCodeModeGuardInstalled,
-	codeModeProviders,
-	CODE_MODE_RUNTIME_KEY,
-	CODE_MODE_GUARD_BRIDGE_KEY,
-	APPROVAL_STORE_KEY,
-	CODE_MODE_PROVIDER_WRAPPED,
-	CODE_MODE_TOOL_WRAPPED,
-};

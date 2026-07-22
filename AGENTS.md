@@ -65,6 +65,8 @@ After editing the file, have the user run `/infra-guard-notify-test`. Terminal p
 
 Keep tool-specific policy out of `shell.ts`. Add an executable name in `guarded-executables.ts`, implement its rules in `tool-policies.ts`, and register its evaluator in `policy.ts`; the typed registry fails type-checking when a guarded executable has no evaluator. Global `Symbol.for(...)` keys are reload compatibility boundaries and must remain byte-for-byte stable.
 
+Tests mirror module ownership (`attention.test.ts`, `policy.test.ts`, `approvals.test.ts`, and `code-mode.test.ts`). Keep cross-module Pi lifecycle coverage in `extension.test.ts`. `index.test.ts` is only the aggregate runner; do not restore a production `_test` export to reach internals.
+
 ### Checks
 
 - Run `npm run check` after changes; it type-checks, tests, and verifies the package contents.
