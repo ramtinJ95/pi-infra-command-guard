@@ -3,6 +3,7 @@ import { collectPositionals, normalizeForInfraScan, type Invocation } from "./sh
 type AllowDecision = { allow: true; reason?: undefined };
 type ApprovalDecision = { allow: false; reason: string };
 type PolicyDecision = AllowDecision | ApprovalDecision;
+type ToolEvaluator = (invocation: Invocation) => PolicyDecision;
 
 const SAFE_KUBECTL_TOP_LEVEL = new Set([
 	"api-resources",
@@ -366,4 +367,4 @@ export {
 	evaluateHelm,
 	evaluateArgocd,
 };
-export type { AllowDecision, ApprovalDecision, PolicyDecision };
+export type { AllowDecision, ApprovalDecision, PolicyDecision, ToolEvaluator };

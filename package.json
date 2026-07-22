@@ -29,6 +29,7 @@
     "extensions/infra-command-guard/approvals.ts",
     "extensions/infra-command-guard/attention.ts",
     "extensions/infra-command-guard/code-mode.ts",
+    "extensions/infra-command-guard/guarded-executables.ts",
     "extensions/infra-command-guard/policy.ts",
     "extensions/infra-command-guard/shell.ts",
     "extensions/infra-command-guard/tool-policies.ts",

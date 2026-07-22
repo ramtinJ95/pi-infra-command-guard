@@ -1,5 +1,6 @@
-const INFRA_PATTERN_GLOBAL = /\b(?:kubectl|terraform|helm|argocd)\b/i;
-const RM_PATTERN_GLOBAL = /\brm\b/i;
+import { GUARDED_EXECUTABLES } from "./guarded-executables.ts";
+
+const GUARDED_PATTERN = new RegExp(`\\b(?:${GUARDED_EXECUTABLES.join("|")})\\b`, "i");
 
 type ShellSegment = { words: string[]; bare: string };
 type ParsedCommands =
@@ -128,16 +129,8 @@ function normalizeForInfraScan(text: string): string {
 	return String(text || "").replace(/["'\\]/g, "");
 }
 
-function containsInfraText(text: string): boolean {
-	return INFRA_PATTERN_GLOBAL.test(normalizeForInfraScan(text));
-}
-
-function containsRmText(text: string): boolean {
-	return RM_PATTERN_GLOBAL.test(normalizeForInfraScan(text));
-}
-
 function containsGuardedText(text: string): boolean {
-	return containsInfraText(text) || containsRmText(text);
+	return GUARDED_PATTERN.test(normalizeForInfraScan(text));
 }
 
 function hasDynamicExecutable(command: string): boolean {

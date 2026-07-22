@@ -60,9 +60,10 @@ After editing the file, have the user run `/infra-guard-notify-test`. Terminal p
 - `approvals.ts`: execution identity, expiring one-time grants, and guard decisions
 - `approval-ui.ts`: structured approval overlay
 - `code-mode.ts`: private Code Mode runtime adapter and reload-safe bridge symbols
+- `guarded-executables.ts`: canonical guarded executable names shared by scanning and policy dispatch
 - `index.ts`: Pi hooks, tools, commands, and lifecycle composition
 
-Keep tool-specific policy out of `shell.ts`. Add or change infrastructure command rules in `tool-policies.ts`, then compose them through `policy.ts`. Global `Symbol.for(...)` keys are reload compatibility boundaries and must remain byte-for-byte stable.
+Keep tool-specific policy out of `shell.ts`. Add an executable name in `guarded-executables.ts`, implement its rules in `tool-policies.ts`, and register its evaluator in `policy.ts`; the typed registry fails type-checking when a guarded executable has no evaluator. Global `Symbol.for(...)` keys are reload compatibility boundaries and must remain byte-for-byte stable.
 
 ### Checks
 

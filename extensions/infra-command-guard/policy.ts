@@ -7,6 +7,7 @@ import {
 	hasDynamicExecutable,
 	parseSimpleCommands,
 } from "./shell.ts";
+import { type GuardedExecutable } from "./guarded-executables.ts";
 import {
 	allow,
 	evaluateArgocd,
@@ -16,7 +17,21 @@ import {
 	isKubectlPortForwardOnlyCommand,
 	requireApproval,
 	type PolicyDecision,
+	type ToolEvaluator,
 } from "./tool-policies.ts";
+
+const TOOL_EVALUATORS = {
+	argocd: evaluateArgocd,
+	helm: evaluateHelm,
+	kubectl: evaluateKubectl,
+	rm: () => requireApproval("rm command needs confirmation"),
+	terraform: evaluateTerraform,
+} satisfies Record<GuardedExecutable, ToolEvaluator>;
+
+function toolEvaluator(executable: string): ToolEvaluator | undefined {
+	if (!Object.hasOwn(TOOL_EVALUATORS, executable)) return undefined;
+	return TOOL_EVALUATORS[executable as GuardedExecutable];
+}
 
 function evaluateCommand(command: string): PolicyDecision {
 	if (hasDynamicExecutable(command)) {
@@ -57,30 +72,9 @@ function evaluateCommand(command: string): PolicyDecision {
 			return requireApproval(`This command delegates guarded execution through ${invocation.executable}, which requires manual approval`);
 		}
 
-		if (invocation.executable === "rm") {
-			return requireApproval("rm command needs confirmation");
-		}
-
-		if (invocation.executable === "kubectl") {
-			const decision = evaluateKubectl(invocation);
-			if (!decision.allow) return decision;
-			continue;
-		}
-
-		if (invocation.executable === "terraform") {
-			const decision = evaluateTerraform(invocation);
-			if (!decision.allow) return decision;
-			continue;
-		}
-
-		if (invocation.executable === "helm") {
-			const decision = evaluateHelm(invocation);
-			if (!decision.allow) return decision;
-			continue;
-		}
-
-		if (invocation.executable === "argocd") {
-			const decision = evaluateArgocd(invocation);
+		const evaluator = toolEvaluator(invocation.executable);
+		if (evaluator) {
+			const decision = evaluator(invocation);
 			if (!decision.allow) return decision;
 			continue;
 		}
