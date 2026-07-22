@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { evaluateCommandWithRm, isInteractiveInterpreterCommand } from "./policy.ts";
+import { evaluateCommand, isInteractiveInterpreterCommand } from "./policy.ts";
 
 const APPROVAL_STORE_KEY = Symbol.for("infra-command-guard.approval-store.v1");
 const APPROVAL_TTL_MS = 10 * 60 * 1000;
@@ -168,7 +168,7 @@ function guardExecution(
 		};
 	}
 	if (store.consume(identity)) return { allow: true };
-	const decision = evaluateCommandWithRm(identity.command);
+	const decision = evaluateCommand(identity.command);
 	if (decision.allow) return { allow: true };
 	if (mode !== "tui") {
 		return {

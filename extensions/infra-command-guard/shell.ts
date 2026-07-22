@@ -546,7 +546,6 @@ export {
 	SHELL_EXECUTION_BUILTINS,
 	normalizeForInfraScan,
 	containsGuardedText,
-	containsRmText,
 	hasDynamicExecutable,
 	parseSimpleCommands,
 	extractInvocation,

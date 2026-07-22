@@ -34,11 +34,9 @@ import {
 	type CodeModeGuardBridge,
 } from "./code-mode.ts";
 import {
-	checkRm,
 	collectPositionals,
 	evaluateArgocd,
 	evaluateCommand,
-	evaluateCommandWithRm,
 	evaluateHelm,
 	evaluateKubectl,
 	evaluateTerraform,
@@ -235,8 +233,6 @@ export const _test = {
 	evaluateTerraform,
 	evaluateHelm,
 	evaluateArgocd,
-	checkRm,
-	evaluateCommandWithRm,
 	hasDynamicExecutable,
 	parseApprovalAttentionSettings,
 	loadApprovalAttentionSettings,

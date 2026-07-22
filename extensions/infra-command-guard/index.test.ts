@@ -8,7 +8,7 @@ function test(name: string, run: () => void | Promise<void>): void {
 }
 
 const {
-	evaluateCommandWithRm,
+	evaluateCommand,
 	executionIdentity,
 	ApprovalStore,
 	guardExecution,
@@ -143,11 +143,11 @@ test("rm classification covers executable paths and common wrappers", () => {
 		"xargs rm",
 		"find . -exec rm {} ;",
 	]) {
-		assert.equal(evaluateCommandWithRm(command).allow, false, command);
+		assert.equal(evaluateCommand(command).allow, false, command);
 	}
 
-	assert.equal(evaluateCommandWithRm('printf "%s\\n" "rm"').allow, true);
-	assert.equal(evaluateCommandWithRm("kubectl port-forward service/api 8080:80 && rm marker").allow, false);
+	assert.equal(evaluateCommand('printf "%s\\n" "rm"').allow, true);
+	assert.equal(evaluateCommand("kubectl port-forward service/api 8080:80 && rm marker").allow, false);
 });
 
 test("kubectl and terraform retain their safe and approval-required behavior", () => {
@@ -165,7 +165,7 @@ test("kubectl and terraform retain their safe and approval-required behavior", (
 		"terraform state list",
 		"terraform workspace show",
 	]) {
-		assert.equal(evaluateCommandWithRm(command).allow, true, command);
+		assert.equal(evaluateCommand(command).allow, true, command);
 	}
 
 	for (const command of [
@@ -183,7 +183,7 @@ test("kubectl and terraform retain their safe and approval-required behavior", (
 		'bash -lc "kubectl get pods"',
 		'python -c "import os; os.system(\'terraform apply\')"',
 	]) {
-		assert.equal(evaluateCommandWithRm(command).allow, false, command);
+		assert.equal(evaluateCommand(command).allow, false, command);
 	}
 });
 
@@ -202,7 +202,7 @@ test("helm allows explicit reads and guards mutations or sensitive output", () =
 		"helm dependency list ./chart",
 		"helm help uninstall",
 	]) {
-		assert.equal(evaluateCommandWithRm(command).allow, true, command);
+		assert.equal(evaluateCommand(command).allow, true, command);
 	}
 
 	for (const command of [
@@ -221,7 +221,7 @@ test("helm allows explicit reads and guards mutations or sensitive output", () =
 		"helm diff upgrade api ./chart",
 		"sudo /opt/homebrew/bin/helm upgrade api ./chart",
 	]) {
-		assert.equal(evaluateCommandWithRm(command).allow, false, command);
+		assert.equal(evaluateCommand(command).allow, false, command);
 	}
 });
 
@@ -244,7 +244,7 @@ test("argocd allows explicit reads and guards application or control-plane mutat
 		"argocd cert list --cert-type https",
 		"argocd gpg list",
 	]) {
-		assert.equal(evaluateCommandWithRm(command).allow, true, command);
+		assert.equal(evaluateCommand(command).allow, true, command);
 	}
 
 	for (const command of [
@@ -267,7 +267,7 @@ test("argocd allows explicit reads and guards application or control-plane mutat
 		"argocd login argocd.example.com",
 		"env ARGOCD_OPTS=--grpc-web /usr/local/bin/argocd app sync api",
 	]) {
-		assert.equal(evaluateCommandWithRm(command).allow, false, command);
+		assert.equal(evaluateCommand(command).allow, false, command);
 	}
 });
 
@@ -293,7 +293,7 @@ test("guarded commands fail closed through shell composition and obfuscation", (
 		'"${KUBECTL}" delete pod api',
 		"$'r''m' -rf target",
 	]) {
-		assert.equal(evaluateCommandWithRm(command).allow, false, command);
+		assert.equal(evaluateCommand(command).allow, false, command);
 	}
 
 	for (const command of [
@@ -305,7 +305,7 @@ test("guarded commands fail closed through shell composition and obfuscation", (
 		'printf "%s\\n" "helm uninstall api"',
 		'printf "%s\\n" "argocd app sync api"',
 	]) {
-		assert.equal(evaluateCommandWithRm(command).allow, true, command);
+		assert.equal(evaluateCommand(command).allow, true, command);
 	}
 });
 
@@ -330,7 +330,7 @@ test("wrapper matrix cannot hide guarded executables", () => {
 	for (const risky of riskyCommands) {
 		for (const wrap of wrappers) {
 			const command = wrap(risky);
-			assert.equal(evaluateCommandWithRm(command).allow, false, command);
+			assert.equal(evaluateCommand(command).allow, false, command);
 		}
 	}
 
@@ -342,7 +342,7 @@ test("wrapper matrix cannot hide guarded executables", () => {
 		"time -p terraform validate",
 		"/usr/bin/env TF_IN_AUTOMATION=1 terraform state list",
 	]) {
-		assert.equal(evaluateCommandWithRm(command).allow, true, command);
+		assert.equal(evaluateCommand(command).allow, true, command);
 	}
 });
 

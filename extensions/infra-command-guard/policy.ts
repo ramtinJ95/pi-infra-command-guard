@@ -3,7 +3,6 @@ import {
 	SHELL_EXECUTION_BUILTINS,
 	SHELL_RUNNERS,
 	containsGuardedText,
-	containsRmText,
 	extractInvocation,
 	hasDynamicExecutable,
 	parseSimpleCommands,
@@ -96,16 +95,6 @@ function evaluateCommand(command: string): PolicyDecision {
 	return allow();
 }
 
-function checkRm(command: string): PolicyDecision {
-	if (!containsRmText(command)) return allow();
-	const decision = evaluateCommand(command);
-	return decision.allow ? allow() : decision;
-}
-
-function evaluateCommandWithRm(command: string): PolicyDecision {
-	return evaluateCommand(command);
-}
-
 export {
 	parseSimpleCommands,
 	extractInvocation,
@@ -120,5 +109,5 @@ export {
 	evaluateHelm,
 	evaluateArgocd,
 } from "./tool-policies.ts";
-export { evaluateCommand, checkRm, evaluateCommandWithRm };
+export { evaluateCommand };
 export type { PolicyDecision } from "./tool-policies.ts";
