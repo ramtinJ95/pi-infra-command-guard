@@ -49,6 +49,23 @@ After editing the file, have the user run `/infra-guard-notify-test`. Terminal p
 
 ## Development
 
+### Architecture
+
+`extensions/infra-command-guard/index.ts` is composition only. Keep dependencies directed toward it; internal modules must not import `index.ts`.
+
+- `attention.ts`: JSON configuration, native and terminal notifications, Herdr routing, and custom sound
+- `shell.ts`: shell parsing, wrapper extraction, and indirect-execution detection
+- `tool-policies.ts`: kubectl, Terraform, Helm, and Argo CD allowlists and evaluators
+- `policy.ts`: guarded-command orchestration and stable policy exports
+- `approvals.ts`: execution identity, expiring one-time grants, and guard decisions
+- `approval-ui.ts`: structured approval overlay
+- `code-mode.ts`: private Code Mode runtime adapter and reload-safe bridge symbols
+- `index.ts`: Pi hooks, tools, commands, and lifecycle composition
+
+Keep tool-specific policy out of `shell.ts`. Add or change infrastructure command rules in `tool-policies.ts`, then compose them through `policy.ts`. Global `Symbol.for(...)` keys are reload compatibility boundaries and must remain byte-for-byte stable.
+
+### Checks
+
 - Run `npm test` after behavior changes.
 - Run `npm run test:package` before publishing and verify only intended files are packed.
 - Preserve the block → structured TUI approval → exact one-time retry flow.
