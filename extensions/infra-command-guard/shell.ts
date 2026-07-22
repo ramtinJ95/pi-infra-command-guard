@@ -1,6 +1,27 @@
 const INFRA_PATTERN_GLOBAL = /\b(?:kubectl|terraform|helm|argocd)\b/i;
 const RM_PATTERN_GLOBAL = /\brm\b/i;
 
+type ShellSegment = { words: string[]; bare: string };
+type ParsedCommands =
+	| { segments: ShellSegment[]; error?: undefined }
+	| { segments?: undefined; error: string };
+type OptionClassification = "boolean" | "value" | "unknown";
+type ConsumedOptions =
+	| { index: number; error?: undefined }
+	| { index?: undefined; error: string };
+type CollectedPositionals =
+	| { positionals: string[]; error?: undefined }
+	| { positionals?: undefined; error: string };
+type Invocation = {
+	executable: string | null;
+	rawExecutable?: string;
+	args: string[];
+	words: string[];
+	wrappers: string[];
+	error?: undefined;
+};
+type InvocationResult = Invocation | { error: string; executable?: undefined; args?: undefined; words?: undefined; wrappers?: undefined };
+
 const SHELL_RUNNERS = new Set([
 	"sh",
 	"bash",
@@ -93,44 +114,44 @@ const SHELL_CONTROL_KEYWORDS = new Set([
 const SHELL_EXECUTION_BUILTINS = new Set([".", "source", "eval", "exec"]);
 const INTERACTIVE_INTERPRETERS = new Set(["bash", "dash", "fish", "node", "perl", "ruby", "sh", "zsh"]);
 
-function stripPath(raw) {
+function stripPath(raw: string): string {
 	const normalized = String(raw || "");
 	const parts = normalized.split(/[\\/]/);
 	return (parts[parts.length - 1] || normalized).toLowerCase();
 }
 
-function isAssignmentWord(word) {
+function isAssignmentWord(word: string): boolean {
 	return /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(word);
 }
 
-function normalizeForInfraScan(text) {
+function normalizeForInfraScan(text: string): string {
 	return String(text || "").replace(/["'\\]/g, "");
 }
 
-function containsInfraText(text) {
+function containsInfraText(text: string): boolean {
 	return INFRA_PATTERN_GLOBAL.test(normalizeForInfraScan(text));
 }
 
-function containsRmText(text) {
+function containsRmText(text: string): boolean {
 	return RM_PATTERN_GLOBAL.test(normalizeForInfraScan(text));
 }
 
-function containsGuardedText(text) {
+function containsGuardedText(text: string): boolean {
 	return containsInfraText(text) || containsRmText(text);
 }
 
-function hasDynamicExecutable(command) {
+function hasDynamicExecutable(command: string): boolean {
 	if (!String(command || "").includes("$")) return false;
 	const parsed = parseSimpleCommands(command);
-	if (parsed.error) return false;
+	if ("error" in parsed) return false;
 	for (const segment of parsed.segments) {
 		const invocation = extractInvocation(segment.words);
-		if (!invocation.error && invocation.executable?.includes("$")) return true;
+		if (!("error" in invocation) && invocation.executable?.includes("$")) return true;
 	}
 	return false;
 }
 
-function matchesLeadingOption(option, knownSet) {
+function matchesLeadingOption(option: string, knownSet: ReadonlySet<string>): boolean {
 	if (knownSet.has(option)) return true;
 	if (option.includes("=")) {
 		const key = option.slice(0, option.indexOf("="));
@@ -139,16 +160,20 @@ function matchesLeadingOption(option, knownSet) {
 	return false;
 }
 
-function classifyLeadingOption(option, booleanOptions, valueOptions) {
+function classifyLeadingOption(
+	option: string,
+	booleanOptions: ReadonlySet<string>,
+	valueOptions: ReadonlySet<string>,
+): OptionClassification {
 	if (matchesLeadingOption(option, booleanOptions)) return "boolean";
 	if (matchesLeadingOption(option, valueOptions)) return "value";
 	return "unknown";
 }
 
-function parseSimpleCommands(command) {
-	const segments = [];
-	let words = [];
-	let bareWords = [];
+function parseSimpleCommands(command: string): ParsedCommands {
+	const segments: ShellSegment[] = [];
+	let words: string[] = [];
+	let bareWords: string[] = [];
 	let current = "";
 	let currentBare = "";
 	let inSingle = false;
@@ -157,7 +182,7 @@ function parseSimpleCommands(command) {
 	let skipNextWord = false;
 	let inComment = false;
 
-	const add = (ch, quoted) => {
+	const add = (ch: string, quoted: boolean): void => {
 		current += ch;
 		if (!quoted) currentBare += ch;
 	};
@@ -311,7 +336,12 @@ function parseSimpleCommands(command) {
 	return { segments };
 }
 
-function consumeKnownOptions(words, startIndex, booleanOptions, valueOptions) {
+function consumeKnownOptions(
+	words: string[],
+	startIndex: number,
+	booleanOptions: ReadonlySet<string>,
+	valueOptions: ReadonlySet<string>,
+): ConsumedOptions {
 	let index = startIndex;
 	while (index < words.length) {
 		const word = words[index];
@@ -337,9 +367,9 @@ function consumeKnownOptions(words, startIndex, booleanOptions, valueOptions) {
 	return { index };
 }
 
-function extractInvocation(words) {
+function extractInvocation(words: string[]): InvocationResult {
 	let index = 0;
-	const wrappers = [];
+	const wrappers: string[] = [];
 
 	while (index < words.length) {
 		while (index < words.length && isAssignmentWord(words[index])) index += 1;
@@ -354,7 +384,7 @@ function extractInvocation(words) {
 			wrappers.push(executable);
 			index += 1;
 			const consumed = consumeKnownOptions(words, index, ENV_BOOLEAN_OPTIONS, ENV_VALUE_OPTIONS);
-			if (consumed.error) return { error: consumed.error };
+			if (consumed.error !== undefined) return { error: consumed.error };
 			index = consumed.index;
 			while (index < words.length && isAssignmentWord(words[index])) index += 1;
 			continue;
@@ -364,7 +394,7 @@ function extractInvocation(words) {
 			wrappers.push(executable);
 			index += 1;
 			const consumed = consumeKnownOptions(words, index, SUDO_BOOLEAN_OPTIONS, SUDO_VALUE_OPTIONS);
-			if (consumed.error) return { error: consumed.error };
+			if (consumed.error !== undefined) return { error: consumed.error };
 			index = consumed.index;
 			while (index < words.length && isAssignmentWord(words[index])) index += 1;
 			continue;
@@ -374,7 +404,7 @@ function extractInvocation(words) {
 			wrappers.push(executable);
 			index += 1;
 			const consumed = consumeKnownOptions(words, index, TIME_BOOLEAN_OPTIONS, TIME_VALUE_OPTIONS);
-			if (consumed.error) return { error: consumed.error };
+			if (consumed.error !== undefined) return { error: consumed.error };
 			index = consumed.index;
 			continue;
 		}
@@ -434,9 +464,16 @@ function extractInvocation(words) {
 	return { executable: null, args: [], words: [], wrappers };
 }
 
-function collectPositionals(words, options) {
+function collectPositionals(
+	words: string[],
+	options: {
+		maxPositionals: number;
+		leadingBooleanOptions: ReadonlySet<string>;
+		leadingValueOptions: ReadonlySet<string>;
+	},
+): CollectedPositionals {
 	const { maxPositionals, leadingBooleanOptions, leadingValueOptions } = options;
-	const positionals = [];
+	const positionals: string[] = [];
 	let index = 0;
 
 	while (index < words.length && positionals.length < maxPositionals) {
@@ -493,12 +530,12 @@ function collectPositionals(words, options) {
 
 function isInteractiveInterpreterCommand(command: string): boolean {
 	const parsed = parseSimpleCommands(command);
-	if (parsed.error || parsed.segments.length !== 1) return false;
+	if ("error" in parsed || parsed.segments.length !== 1) return false;
 	let invocation = extractInvocation(parsed.segments[0].words);
-	if (invocation.error || !invocation.executable) return false;
+	if ("error" in invocation || !invocation.executable) return false;
 	if (invocation.executable === "exec" && invocation.args.length > 0) {
 		invocation = extractInvocation(invocation.args);
-		if (invocation.error || !invocation.executable) return false;
+		if ("error" in invocation || !invocation.executable) return false;
 	}
 	return INTERACTIVE_INTERPRETERS.has(invocation.executable) || /^python(?:\d+(?:\.\d+)*)?$/.test(invocation.executable);
 }
@@ -516,3 +553,4 @@ export {
 	collectPositionals,
 	isInteractiveInterpreterCommand,
 };
+export type { Invocation, InvocationResult, ParsedCommands, ShellSegment };

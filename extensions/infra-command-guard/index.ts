@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
@@ -69,28 +69,37 @@ const ApproveInfraCommandParams = Type.Object({
 export default function createExtension(pi: ExtensionAPI) {
 	const bashTool = createBashTool(process.cwd());
 	const approvals = new ApprovalStore();
-	const events = pi.events as any;
+	const events = pi.events as unknown as Record<PropertyKey, unknown>;
 	events[APPROVAL_STORE_KEY] = approvals;
 	const currentApprovals = (): ApprovalStore => events[APPROVAL_STORE_KEY] as ApprovalStore;
 	const codeModeBridge: CodeModeGuardBridge = (input, context) => {
-		const nestedContext = context?.extensionContext ?? context;
+		const contextRecord = typeof context === "object" && context !== null
+			? context as Record<string, unknown>
+			: {};
+		const nestedContext = typeof contextRecord.extensionContext === "object" && contextRecord.extensionContext !== null
+			? contextRecord.extensionContext as Record<string, unknown>
+			: contextRecord;
 		const identity = executionIdentity(
 			"code-mode-exec-command",
 			input,
-			typeof context?.cwd === "string"
-				? context.cwd
-				: typeof nestedContext?.cwd === "string"
+			typeof contextRecord.cwd === "string"
+				? contextRecord.cwd
+				: typeof nestedContext.cwd === "string"
 					? nestedContext.cwd
 					: process.cwd(),
 		);
 		if (!identity) {
 			throw new Error("BLOCKED — infra-command-guard could not identify the nested exec_command request.");
 		}
-		const guarded = guardExecution(currentApprovals(), identity, nestedContext?.mode);
+		const guarded = guardExecution(
+			currentApprovals(),
+			identity,
+			typeof nestedContext.mode === "string" ? nestedContext.mode : undefined,
+		);
 		if (!guarded.allow) throw new Error(guarded.reason);
 	};
 	events[CODE_MODE_GUARD_BRIDGE_KEY] = codeModeBridge;
-	const prepareCodeModeGuard = (ctx: any) => {
+	const prepareCodeModeGuard = (ctx: ExtensionContext) => {
 		if (!codeModeRuntime(events)) return undefined;
 		return ensureCodeModeGuardInstalled(events, ctx);
 	};

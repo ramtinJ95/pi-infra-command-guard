@@ -16,9 +16,10 @@ import {
 	evaluateTerraform,
 	isKubectlPortForwardOnlyCommand,
 	requireApproval,
+	type PolicyDecision,
 } from "./tool-policies.ts";
 
-function evaluateCommand(command) {
+function evaluateCommand(command: string): PolicyDecision {
 	if (hasDynamicExecutable(command)) {
 		return requireApproval("This command resolves its executable through a shell variable, which requires manual approval");
 	}
@@ -26,13 +27,13 @@ function evaluateCommand(command) {
 	if (isKubectlPortForwardOnlyCommand(command)) return allow();
 
 	const parsed = parseSimpleCommands(command);
-	if (parsed.error) {
+	if ("error" in parsed) {
 		return requireApproval(`This command uses shell syntax the infra guard cannot classify safely (${parsed.error})`);
 	}
 
 	for (const segment of parsed.segments) {
 		const invocation = extractInvocation(segment.words);
-		if (invocation.error) {
+		if ("error" in invocation) {
 			return requireApproval(`This command uses a wrapper the infra guard cannot classify safely (${invocation.error})`);
 		}
 
@@ -95,13 +96,13 @@ function evaluateCommand(command) {
 	return allow();
 }
 
-function checkRm(command) {
+function checkRm(command: string): PolicyDecision {
 	if (!containsRmText(command)) return allow();
 	const decision = evaluateCommand(command);
 	return decision.allow ? allow() : decision;
 }
 
-function evaluateCommandWithRm(command) {
+function evaluateCommandWithRm(command: string): PolicyDecision {
 	return evaluateCommand(command);
 }
 
@@ -120,3 +121,4 @@ export {
 	evaluateArgocd,
 } from "./tool-policies.ts";
 export { evaluateCommand, checkRm, evaluateCommandWithRm };
+export type { PolicyDecision } from "./tool-policies.ts";

@@ -1,4 +1,8 @@
-import { collectPositionals, normalizeForInfraScan } from "./shell.ts";
+import { collectPositionals, normalizeForInfraScan, type Invocation } from "./shell.ts";
+
+type AllowDecision = { allow: true; reason?: undefined };
+type ApprovalDecision = { allow: false; reason: string };
+type PolicyDecision = AllowDecision | ApprovalDecision;
 
 const SAFE_KUBECTL_TOP_LEVEL = new Set([
 	"api-resources",
@@ -165,7 +169,7 @@ const ARGOCD_LEADING_VALUE_OPTIONS = new Set([
 	"--server-name",
 ]);
 
-function isSecretLikeKubectlTarget(word) {
+function isSecretLikeKubectlTarget(word: string): boolean {
 	const normalized = String(word || "").toLowerCase();
 	return normalized.split(",").some((piece) => {
 		const target = piece.trim();
@@ -173,11 +177,11 @@ function isSecretLikeKubectlTarget(word) {
 	});
 }
 
-function hasRawKubectlFlag(words) {
+function hasRawKubectlFlag(words: string[]): boolean {
 	return words.some((word) => word === "--raw" || word.startsWith("--raw="));
 }
 
-function isKubectlPortForwardOnlyCommand(command) {
+function isKubectlPortForwardOnlyCommand(command: string): boolean {
 	const normalized = normalizeForInfraScan(command).toLowerCase();
 	const kubectlMentions = normalized.match(/\bkubectl\b(?=[\s;|&()<>]|$)/g) || [];
 	if (kubectlMentions.length === 0) return false;
@@ -187,15 +191,15 @@ function isKubectlPortForwardOnlyCommand(command) {
 	return kubectlPortForwardMentions.length === kubectlMentions.length;
 }
 
-function requireApproval(reason: string): { allow: boolean; reason: string } {
+function requireApproval(reason: string): ApprovalDecision {
 	return { allow: false, reason };
 }
 
-function allow(): { allow: boolean; reason?: string } {
+function allow(): AllowDecision {
 	return { allow: true };
 }
 
-function evaluateKubectl(invocation) {
+function evaluateKubectl(invocation: Invocation): PolicyDecision {
 	if (hasRawKubectlFlag(invocation.args)) {
 		return requireApproval("kubectl --raw is not on the low-risk allowlist");
 	}
@@ -205,7 +209,7 @@ function evaluateKubectl(invocation) {
 		leadingBooleanOptions: KUBECTL_LEADING_BOOLEAN_OPTIONS,
 		leadingValueOptions: KUBECTL_LEADING_VALUE_OPTIONS,
 	});
-	if (collected.error) {
+	if ("error" in collected) {
 		return requireApproval(`kubectl uses an unsupported flag layout (${collected.error})`);
 	}
 
@@ -244,13 +248,13 @@ function evaluateKubectl(invocation) {
 	return requireApproval(`kubectl ${topLevel} is not on the low-risk allowlist`);
 }
 
-function evaluateTerraform(invocation) {
+function evaluateTerraform(invocation: Invocation): PolicyDecision {
 	const collected = collectPositionals(invocation.args, {
 		maxPositionals: 2,
 		leadingBooleanOptions: TERRAFORM_LEADING_BOOLEAN_OPTIONS,
 		leadingValueOptions: TERRAFORM_LEADING_VALUE_OPTIONS,
 	});
-	if (collected.error) {
+	if ("error" in collected) {
 		return requireApproval(`terraform uses an unsupported flag layout (${collected.error})`);
 	}
 
@@ -282,7 +286,7 @@ function evaluateTerraform(invocation) {
 	return requireApproval(`terraform ${topLevel} is not on the low-risk allowlist`);
 }
 
-function evaluateHelm(invocation) {
+function evaluateHelm(invocation: Invocation): PolicyDecision {
 	if (invocation.args.some((arg) => arg === "--post-renderer" || arg.startsWith("--post-renderer="))) {
 		return requireApproval("helm --post-renderer can execute an external program");
 	}
@@ -292,7 +296,7 @@ function evaluateHelm(invocation) {
 		leadingBooleanOptions: HELM_LEADING_BOOLEAN_OPTIONS,
 		leadingValueOptions: HELM_LEADING_VALUE_OPTIONS,
 	});
-	if (collected.error) {
+	if ("error" in collected) {
 		return requireApproval(`helm uses an unsupported flag layout (${collected.error})`);
 	}
 
@@ -317,13 +321,13 @@ function evaluateHelm(invocation) {
 	return requireApproval(`helm ${topLevel} is not on the low-risk allowlist`);
 }
 
-function evaluateArgocd(invocation) {
+function evaluateArgocd(invocation: Invocation): PolicyDecision {
 	const collected = collectPositionals(invocation.args, {
 		maxPositionals: 3,
 		leadingBooleanOptions: ARGOCD_LEADING_BOOLEAN_OPTIONS,
 		leadingValueOptions: ARGOCD_LEADING_VALUE_OPTIONS,
 	});
-	if (collected.error) {
+	if ("error" in collected) {
 		return requireApproval(`argocd uses an unsupported flag layout (${collected.error})`);
 	}
 
@@ -362,3 +366,4 @@ export {
 	evaluateHelm,
 	evaluateArgocd,
 };
+export type { AllowDecision, ApprovalDecision, PolicyDecision };

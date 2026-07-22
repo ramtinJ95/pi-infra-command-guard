@@ -66,8 +66,7 @@ Keep tool-specific policy out of `shell.ts`. Add or change infrastructure comman
 
 ### Checks
 
-- Run `npm test` after behavior changes.
-- Run `npm run test:package` before publishing and verify only intended files are packed.
+- Run `npm run check` after changes; it type-checks, tests, and verifies the package contents.
 - Preserve the block → structured TUI approval → exact one-time retry flow.
 - Notification failures must never approve, execute, or suppress a blocked command.
 - Keep terminal protocols explicit: Kitty uses OSC 99; Ghostty uses OSC 9. Do not send guessed control sequences to unknown terminals.

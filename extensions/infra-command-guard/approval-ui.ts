@@ -1,5 +1,11 @@
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TUI } from "@earendil-works/pi-tui";
+
+type ApprovalDetails = {
+	summary: string;
+	flags: Array<{ flag: string; meaning: string }>;
+	blastRadius: string;
+};
 
 function wrapBlock(text: string, width: number): string[] {
 	const normalized = String(text || "").replace(/\r\n/g, "\n");
@@ -25,12 +31,8 @@ class InfraApprovalOverlay {
 	constructor(
 		private tui: TUI,
 		private theme: Theme,
-		private keybindings: any,
-		private approvalDetails: {
-			summary: string;
-			flags: Array<{ flag: string; meaning: string }>;
-			blastRadius: string;
-		},
+		private keybindings: KeybindingsManager,
+		private approvalDetails: ApprovalDetails,
 		private reason: string,
 		private command: string,
 		private done: (approved: boolean) => void,
@@ -217,13 +219,14 @@ class InfraApprovalOverlay {
 }
 
 async function requestInfraApproval(
-	ctx: any,
-	approvalDetails: { summary: string; flags: Array<{ flag: string; meaning: string }>; blastRadius: string },
+	ctx: Pick<ExtensionContext, "ui">,
+	approvalDetails: ApprovalDetails,
 	reason: string,
 	command: string,
 ): Promise<boolean> {
-	const approved = await ctx.ui.custom(
-		(tui, theme, keybindings, done) => new InfraApprovalOverlay(tui, theme, keybindings, approvalDetails, reason, command, done),
+	const approved = await ctx.ui.custom<boolean>(
+		(tui: TUI, theme: Theme, keybindings: KeybindingsManager, done: (approved: boolean) => void) =>
+			new InfraApprovalOverlay(tui, theme, keybindings, approvalDetails, reason, command, done),
 		{
 			overlay: true,
 			overlayOptions: {
@@ -238,3 +241,4 @@ async function requestInfraApproval(
 }
 
 export { requestInfraApproval };
+export type { ApprovalDetails };

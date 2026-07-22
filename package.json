@@ -52,12 +52,14 @@
     "@earendil-works/pi-coding-agent": "^0.81.1",
     "@earendil-works/pi-tui": "^0.81.1",
     "@types/node": "^24.0.0",
-    "typebox": "^1.1.38"
+    "typebox": "^1.1.38",
+    "typescript": "^7.0.2"
   },
   "scripts": {
     "test": "bun extensions/infra-command-guard/index.test.ts",
+    "typecheck": "tsc",
     "test:package": "npm pack --dry-run",
-    "check": "npm test && npm run test:package"
+    "check": "npm run typecheck && npm test && npm run test:package"
   },
   "publishConfig": {
     "access": "public"

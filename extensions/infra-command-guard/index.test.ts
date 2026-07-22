@@ -389,19 +389,23 @@ test("approval validation rejects proactive, mismatched, cancelled, and expired 
 
 	const blocked = guardExecution(store, identity, "tui");
 	assert.equal(blocked.allow, false);
-	assert.deepEqual(store.approve(blocked.requestId, `${identity.command} `, "kubectl delete is not on the low-risk allowlist"), {
+	const blockedRequestId = blocked.allow ? undefined : blocked.requestId;
+	assert.ok(blockedRequestId);
+	assert.deepEqual(store.approve(blockedRequestId, `${identity.command} `, "kubectl delete is not on the low-risk allowlist"), {
 		ok: false,
 		error: "Approval request does not match the exact blocked command. Do not retry the command.",
 	});
-	store.cancel(blocked.requestId!);
-	assert.deepEqual(store.approve(blocked.requestId, identity.command, "kubectl delete is not on the low-risk allowlist"), {
+	store.cancel(blockedRequestId);
+	assert.deepEqual(store.approve(blockedRequestId, identity.command, "kubectl delete is not on the low-risk allowlist"), {
 		ok: false,
 		error: "Approval request is missing or expired. Retry the blocked shell call to create a new request.",
 	});
 
 	const expiring = guardExecution(store, identity, "tui");
 	assert.equal(expiring.allow, false);
-	assert.deepEqual(store.approve(expiring.requestId, identity.command, "kubectl delete is not on the low-risk allowlist"), { ok: true });
+	const expiringRequestId = expiring.allow ? undefined : expiring.requestId;
+	assert.ok(expiringRequestId);
+	assert.deepEqual(store.approve(expiringRequestId, identity.command, "kubectl delete is not on the low-risk allowlist"), { ok: true });
 	now += 11 * 60 * 1000;
 	assert.equal(store.consume(identity), false);
 });
@@ -460,7 +464,7 @@ test("Code Mode provider wrapper blocks before invoke and reads the current relo
 			return [
 				{
 					name: "exec_command",
-					async invoke() {
+					async invoke(_input?: unknown, _context?: unknown, _signal?: AbortSignal) {
 						invokeCount += 1;
 						return "ran";
 					},
@@ -478,7 +482,7 @@ test("Code Mode provider wrapper blocks before invoke and reads the current relo
 	assert.deepEqual(ensureCodeModeGuardInstalled(events, { cwd: "/tmp" }), { ok: true });
 	assert.deepEqual(ensureCodeModeGuardInstalled(events, { cwd: "/tmp" }), { ok: true });
 	const firstTool = provider.getTools()[0]!;
-	assert.equal(Boolean(firstTool[CODE_MODE_TOOL_WRAPPED]), true);
+	assert.equal(Object.prototype.hasOwnProperty.call(firstTool, CODE_MODE_TOOL_WRAPPED), true);
 	await assert.rejects(firstTool.invoke({ cmd: "rm target" }, { cwd: "/tmp" }), /blocked by test bridge/);
 	assert.equal(invokeCount, 0);
 
@@ -502,7 +506,7 @@ test("Code Mode adapter guards providers added after startup", async () => {
 			return [
 				{
 					name: "exec_command",
-					async invoke() {
+					async invoke(_input?: unknown, _context?: unknown, _signal?: AbortSignal) {
 						calls.push(name);
 						return name;
 					},
@@ -592,7 +596,7 @@ test("extension outer exec hook installs the nested guard before Code Mode colle
 			return [
 				{
 					name: "exec_command",
-					async invoke() {
+					async invoke(_input?: unknown, _context?: unknown, _signal?: AbortSignal) {
 						invokeCount += 1;
 					},
 				},
@@ -646,7 +650,7 @@ test("Code Mode wrapper switches bridges safely across guard reloads", async () 
 			return [
 				{
 					name: "exec_command",
-					async invoke() {
+					async invoke(_input?: unknown, _context?: unknown, _signal?: AbortSignal) {
 						invokeCount += 1;
 					},
 				},

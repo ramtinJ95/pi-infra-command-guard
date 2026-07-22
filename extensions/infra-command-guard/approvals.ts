@@ -127,7 +127,7 @@ class ApprovalStore {
 	}
 }
 
-function formatApprovalRequest(reason, command, requestId) {
+function formatApprovalRequest(reason: string, command: string, requestId: string): string {
 	return [
 		`BLOCKED — ${reason}`,
 		`Command: ${command}`,

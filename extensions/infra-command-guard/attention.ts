@@ -2,13 +2,14 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const CONFIG_FILE_NAME = "infra-command-guard.json";
 
 type AttentionProcess = { command: string; args: string[] };
 type NotificationBackend = "auto" | "native" | "terminal";
 type TerminalNotificationBackend = "kitty" | "ghostty";
+type AttentionContext = Pick<ExtensionContext, "ui"> | undefined;
 type ApprovalAttentionSettings = {
 	notifications: { enabled: boolean; backend: NotificationBackend };
 	sound: { enabled: boolean; path: string | null };
@@ -105,8 +106,10 @@ function loadApprovalAttentionSettings(configPath = join(getAgentDir(), CONFIG_F
 	try {
 		const source = readFileSync(configPath, "utf8");
 		return { configPath, settings: parseApprovalAttentionSettings(JSON.parse(source), configPath) };
-	} catch (error: any) {
-		if (error?.code === "ENOENT") return { configPath, settings: DEFAULT_ATTENTION_SETTINGS };
+	} catch (error: unknown) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+			return { configPath, settings: DEFAULT_ATTENTION_SETTINGS };
+		}
 		return {
 			configPath,
 			settings: DEFAULT_ATTENTION_SETTINGS,
@@ -115,13 +118,13 @@ function loadApprovalAttentionSettings(configPath = join(getAgentDir(), CONFIG_F
 	}
 }
 
-function notifyAttentionFailure(ctx: any, label: string): void {
+function notifyAttentionFailure(ctx: AttentionContext, label: string): void {
 	try {
 		ctx?.ui?.notify?.(`infra-command-guard could not ${label}; the approval overlay is still active.`, "warning");
 	} catch {}
 }
 
-function runAttentionProcess(candidates: AttentionProcess[], ctx: any, label: string, index = 0): void {
+function runAttentionProcess(candidates: AttentionProcess[], ctx: AttentionContext, label: string, index = 0): void {
 	const candidate = candidates[index];
 	if (!candidate) {
 		notifyAttentionFailure(ctx, label);
@@ -318,7 +321,7 @@ function sendTerminalNotification(
 }
 
 async function requestApprovalAttention(
-	ctx: any,
+	ctx: AttentionContext,
 	title = "Pi infrastructure guard",
 	body = "A command requires approval in Pi.",
 ): Promise<string> {
