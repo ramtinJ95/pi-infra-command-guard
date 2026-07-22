@@ -6,7 +6,7 @@ import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-ag
 
 const CONFIG_FILE_NAME = "infra-command-guard.json";
 
-type AttentionProcess = { command: string; args: string[] };
+type AttentionProcess = { command: string; args: string[]; env?: NodeJS.ProcessEnv };
 type NotificationBackend = "auto" | "native" | "terminal";
 type TerminalNotificationBackend = "kitty" | "ghostty";
 type AttentionContext = Pick<ExtensionContext, "ui"> | undefined;
@@ -135,6 +135,7 @@ function runAttentionProcess(candidates: AttentionProcess[], ctx: AttentionConte
 	try {
 		const child = spawn(candidate.command, candidate.args, {
 			stdio: "ignore",
+			env: candidate.env ? { ...process.env, ...candidate.env } : undefined,
 		});
 		const tryNext = () => {
 			if (settled) return;
@@ -166,9 +167,9 @@ function customSoundProcesses(path: string, platform: NodeJS.Platform = process.
 					"-NoProfile",
 					"-NonInteractive",
 					"-Command",
-					"(New-Object System.Media.SoundPlayer($args[0])).PlaySync()",
-					path,
+					"(New-Object System.Media.SoundPlayer($env:PI_INFRA_COMMAND_GUARD_INTERNAL_SOUND_PATH)).PlaySync()",
 				],
+				env: { PI_INFRA_COMMAND_GUARD_INTERNAL_SOUND_PATH: path },
 			},
 		];
 	}
@@ -184,7 +185,13 @@ function nativeNotificationProcesses(
 		return [
 			{
 				command: "/usr/bin/osascript",
-				args: ["-e", `display notification "${body}" with title "${title}"`],
+				args: [
+					"-e",
+					"on run argv\n  display notification (item 2 of argv) with title (item 1 of argv)\nend run",
+					"--",
+					title,
+					body,
+				],
 			},
 		];
 	}
@@ -199,8 +206,12 @@ function nativeNotificationProcesses(
 					"-NoProfile",
 					"-NonInteractive",
 					"-Command",
-					`Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Warning; $n.Visible = $true; $n.ShowBalloonTip(5000, '${title}', '${body}', 'Warning'); Start-Sleep -Seconds 6; $n.Dispose()`,
+					"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Warning; $n.Visible = $true; $n.ShowBalloonTip(5000, $env:PI_INFRA_COMMAND_GUARD_INTERNAL_NOTIFICATION_TITLE, $env:PI_INFRA_COMMAND_GUARD_INTERNAL_NOTIFICATION_BODY, 'Warning'); Start-Sleep -Seconds 6; $n.Dispose()",
 				],
+				env: {
+					PI_INFRA_COMMAND_GUARD_INTERNAL_NOTIFICATION_TITLE: title,
+					PI_INFRA_COMMAND_GUARD_INTERNAL_NOTIFICATION_BODY: body,
+				},
 			},
 		];
 	}

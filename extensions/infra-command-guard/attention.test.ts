@@ -110,9 +110,22 @@ test("terminal notifications detect Kitty and Ghostty and emit their documented 
 });
 
 test("native notifications and custom sound are independent", () => {
-	assert.doesNotMatch(nativeNotificationProcesses("darwin")[0]!.args.join(" "), /sound name/);
-	assert.doesNotMatch(nativeNotificationProcesses("win32")[0]!.args.join(" "), /SystemSounds/);
+	const title = 'Title "quoted"; do shell script "false"';
+	const body = "Body 'quoted'; Write-Error injected";
+	const macos = nativeNotificationProcesses("darwin", title, body)[0]!;
+	assert.deepEqual(macos.args.slice(-3), ["--", title, body]);
+	assert.doesNotMatch(macos.args[1]!, /do shell script|Write-Error/);
+	assert.doesNotMatch(macos.args.join(" "), /sound name/);
+
+	const windows = nativeNotificationProcesses("win32", title, body)[0]!;
+	assert.doesNotMatch(windows.args.join(" "), /Title "quoted"|Write-Error injected|SystemSounds/);
+	assert.equal(windows.env?.PI_INFRA_COMMAND_GUARD_INTERNAL_NOTIFICATION_TITLE, title);
+	assert.equal(windows.env?.PI_INFRA_COMMAND_GUARD_INTERNAL_NOTIFICATION_BODY, body);
+
 	assert.deepEqual(customSoundProcesses("/tmp/approval.wav", "darwin"), [
 		{ command: "/usr/bin/afplay", args: ["/tmp/approval.wav"] },
 	]);
+	const windowsSound = customSoundProcesses("C:\\Sounds\\approval's.wav", "win32")[0]!;
+	assert.doesNotMatch(windowsSound.args.join(" "), /approval's\.wav/);
+	assert.equal(windowsSound.env?.PI_INFRA_COMMAND_GUARD_INTERNAL_SOUND_PATH, "C:\\Sounds\\approval's.wav");
 });
