@@ -6,11 +6,14 @@ import {
 	extractInvocation,
 	hasDynamicExecutable,
 	parseSimpleCommands,
+	type Invocation,
 } from "./shell.ts";
 import {
+	DEFAULT_COMMAND_OVERRIDES,
 	DEFAULT_GUARD_SETTINGS,
 	GUARDED_EXECUTABLES,
 	enabledGuardedExecutables,
+	type CommandOverrides,
 	type GuardedExecutable,
 	type GuardSettings,
 } from "./guarded-executables.ts";
@@ -23,7 +26,9 @@ import {
 	evaluateHelm,
 	evaluateKubectl,
 	evaluateTerraform,
+	evaluateNonBypassableRisk,
 	isKubectlPortForwardOnlyCommand,
+	normalizeOverrideArguments,
 	requireApproval,
 	type PolicyDecision,
 	type ToolEvaluator,
@@ -45,9 +50,49 @@ function toolEvaluator(executable: string): ToolEvaluator | undefined {
 	return TOOL_EVALUATORS[executable as GuardedExecutable];
 }
 
+function wildcardTokenMatches(pattern: string, value: string): boolean {
+	const parts = pattern.split("*");
+	if (parts.length === 1) return pattern === value;
+	let cursor = 0;
+	const first = parts[0];
+	if (first) {
+		if (!value.startsWith(first)) return false;
+		cursor = first.length;
+	}
+	for (let index = 1; index < parts.length - 1; index += 1) {
+		const part = parts[index];
+		if (!part) continue;
+		const matchIndex = value.indexOf(part, cursor);
+		if (matchIndex === -1) return false;
+		cursor = matchIndex + part.length;
+	}
+	const last = parts[parts.length - 1];
+	return !last || (value.endsWith(last) && value.length - last.length >= cursor);
+}
+
+function commandRuleMatches(rule: string, args: string[]): boolean {
+	const tokens = rule.split(" ");
+	return tokens.length <= args.length && tokens.every((token, index) => wildcardTokenMatches(token, args[index]));
+}
+
+function matchingCommandOverride(
+	executable: GuardedExecutable,
+	invocation: Invocation,
+	commandOverrides: CommandOverrides,
+): { action: "allow" | "requireApproval"; rule: string } | undefined {
+	const rules = commandOverrides[executable];
+	if (rules.allow.length === 0 && rules.requireApproval.length === 0) return undefined;
+	const args = normalizeOverrideArguments(executable, invocation.args);
+	const requireApprovalRule = rules.requireApproval.find((rule) => commandRuleMatches(rule, args));
+	if (requireApprovalRule) return { action: "requireApproval", rule: requireApprovalRule };
+	const allowRule = rules.allow.find((rule) => commandRuleMatches(rule, args));
+	return allowRule ? { action: "allow", rule: allowRule } : undefined;
+}
+
 function evaluateCommand(
 	command: string,
 	guardSettings: GuardSettings = DEFAULT_GUARD_SETTINGS,
+	commandOverrides: CommandOverrides = DEFAULT_COMMAND_OVERRIDES,
 ): PolicyDecision {
 	const enabledExecutables = guardSettings === DEFAULT_GUARD_SETTINGS
 		? GUARDED_EXECUTABLES
@@ -58,7 +103,13 @@ function evaluateCommand(
 		return requireApproval("This command resolves its executable through a shell variable, which requires manual approval");
 	}
 	if (!containsGuardedText(command, enabledExecutables)) return allow();
-	if (guardSettings.kubectl && isKubectlPortForwardOnlyCommand(command)) return allow();
+	const kubectlOverrides = commandOverrides.kubectl;
+	if (
+		guardSettings.kubectl &&
+		kubectlOverrides.allow.length === 0 &&
+		kubectlOverrides.requireApproval.length === 0 &&
+		isKubectlPortForwardOnlyCommand(command)
+	) return allow();
 
 	const parsed = parseSimpleCommands(command);
 	if ("error" in parsed) {
@@ -94,7 +145,19 @@ function evaluateCommand(
 
 		const evaluator = toolEvaluator(invocation.executable);
 		if (evaluator) {
-			if (guardSettings[invocation.executable as GuardedExecutable]) {
+			const executable = invocation.executable as GuardedExecutable;
+			if (guardSettings[executable]) {
+				const override = commandOverrides === DEFAULT_COMMAND_OVERRIDES
+					? undefined
+					: matchingCommandOverride(executable, invocation, commandOverrides);
+				if (override?.action === "requireApproval") {
+					return requireApproval(`Custom command rule requires approval for ${executable} ${override.rule}`);
+				}
+				if (override?.action === "allow") {
+					const nonBypassableRisk = evaluateNonBypassableRisk(executable, invocation);
+					if (nonBypassableRisk) return nonBypassableRisk;
+					continue;
+				}
 				const decision = evaluator(invocation);
 				if (!decision.allow) return decision;
 			}

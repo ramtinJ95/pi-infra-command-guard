@@ -8,7 +8,7 @@ import {
 	guardExecution,
 } from "./approvals.ts";
 import { requestInfraApproval } from "./approval-ui.ts";
-import { loadGuardSettings, requestApprovalAttention } from "./attention.ts";
+import { loadPolicySettings, requestApprovalAttention } from "./attention.ts";
 import {
 	CODE_MODE_GUARD_BRIDGE_KEY,
 	CODE_MODE_RUNTIME_KEY,
@@ -16,7 +16,11 @@ import {
 	ensureCodeModeGuardInstalled,
 	type CodeModeGuardBridge,
 } from "./code-mode.ts";
-import { hasEnabledGuards, type GuardSettings } from "./guarded-executables.ts";
+import {
+	hasEnabledGuards,
+	type CommandOverrides,
+	type GuardSettings,
+} from "./guarded-executables.ts";
 
 const CODE_MODE_PUBLIC_TOOL_NAMES = new Set(["exec", "wait", "functions.exec", "functions.wait"]);
 
@@ -43,8 +47,11 @@ export default function createExtension(pi: ExtensionAPI) {
 	const currentApprovals = (): ApprovalStore => events[APPROVAL_STORE_KEY] as ApprovalStore;
 	let lastConfigWarning: string | undefined;
 	let lastGuardRevision: string | undefined;
-	const currentGuardSettings = (context?: { ui?: ExtensionContext["ui"] }): GuardSettings => {
-		const loaded = loadGuardSettings();
+	const currentPolicySettings = (context?: { ui?: ExtensionContext["ui"] }): {
+		guards: GuardSettings;
+		commands: CommandOverrides;
+	} => {
+		const loaded = loadPolicySettings();
 		const revision = `${loaded.error ? `invalid:${loaded.error}:` : "valid:"}${JSON.stringify(loaded.settings)}`;
 		if (lastGuardRevision !== undefined && revision !== lastGuardRevision) {
 			currentApprovals().clear();
@@ -54,7 +61,7 @@ export default function createExtension(pi: ExtensionAPI) {
 			lastConfigWarning = undefined;
 			return loaded.settings;
 		}
-		const warning = `infra-command-guard could not read ${loaded.configPath}: ${loaded.error}. All command guards remain enabled.`;
+		const warning = `infra-command-guard could not read ${loaded.configPath}: ${loaded.error}. All command guards remain enabled with built-in policies.`;
 		if (warning !== lastConfigWarning) {
 			try {
 				if (context?.ui?.notify) {
@@ -72,8 +79,8 @@ export default function createExtension(pi: ExtensionAPI) {
 		const nestedContext = typeof contextRecord.extensionContext === "object" && contextRecord.extensionContext !== null
 			? contextRecord.extensionContext as Record<string, unknown>
 			: contextRecord;
-		const guardSettings = currentGuardSettings(nestedContext as { ui?: ExtensionContext["ui"] });
-		if (!hasEnabledGuards(guardSettings)) return;
+		const policySettings = currentPolicySettings(nestedContext as { ui?: ExtensionContext["ui"] });
+		if (!hasEnabledGuards(policySettings.guards)) return;
 		const identity = executionIdentity(
 			"code-mode-exec-command",
 			input,
@@ -90,7 +97,8 @@ export default function createExtension(pi: ExtensionAPI) {
 			currentApprovals(),
 			identity,
 			typeof nestedContext.mode === "string" ? nestedContext.mode : undefined,
-			guardSettings,
+			policySettings.guards,
+			policySettings.commands,
 		);
 		if (!guarded.allow) throw new Error(guarded.reason);
 	};
@@ -136,7 +144,7 @@ export default function createExtension(pi: ExtensionAPI) {
 		],
 		parameters: ApproveInfraCommandParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			currentGuardSettings(ctx);
+			currentPolicySettings(ctx);
 			const approvalStore = currentApprovals();
 			const validation = approvalStore.validate(params.request_id, params.command, params.reason);
 			if (!validation.ok) {
@@ -184,10 +192,10 @@ export default function createExtension(pi: ExtensionAPI) {
 
 	pi.on("tool_call", (event, ctx) => {
 		if (CODE_MODE_PUBLIC_TOOL_NAMES.has(event.toolName)) {
-			const guardSettings = currentGuardSettings(ctx);
+			const policySettings = currentPolicySettings(ctx);
 			const installed = prepareCodeModeGuard(ctx);
 			if (installed?.ok) return undefined;
-			if (!hasEnabledGuards(guardSettings)) return undefined;
+			if (!hasEnabledGuards(policySettings.guards)) return undefined;
 			const failed = installed ?? {
 				ok: false as const,
 				reason: "Code Mode runtime was not found",
@@ -202,7 +210,14 @@ export default function createExtension(pi: ExtensionAPI) {
 
 		const identity = executionIdentity("exec-command", event.input, ctx.cwd);
 		if (!identity) return undefined;
-		const guarded = guardExecution(currentApprovals(), identity, ctx.mode, currentGuardSettings(ctx));
+		const policySettings = currentPolicySettings(ctx);
+		const guarded = guardExecution(
+			currentApprovals(),
+			identity,
+			ctx.mode,
+			policySettings.guards,
+			policySettings.commands,
+		);
 		return guarded.allow ? undefined : { block: true, reason: guarded.reason };
 	});
 
@@ -211,7 +226,14 @@ export default function createExtension(pi: ExtensionAPI) {
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 			const identity = executionIdentity("bash", params, process.cwd());
 			if (!identity) return bashTool.execute(toolCallId, params, signal, onUpdate);
-			const guarded = guardExecution(currentApprovals(), identity, ctx.mode, currentGuardSettings(ctx));
+			const policySettings = currentPolicySettings(ctx);
+			const guarded = guardExecution(
+				currentApprovals(),
+				identity,
+				ctx.mode,
+				policySettings.guards,
+				policySettings.commands,
+			);
 			if (!guarded.allow) throw new Error(guarded.reason);
 			return bashTool.execute(toolCallId, params, signal, onUpdate);
 		},

@@ -4,8 +4,10 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	DEFAULT_COMMAND_OVERRIDES,
 	DEFAULT_GUARD_SETTINGS,
 	GUARDED_EXECUTABLES,
+	type CommandOverrides,
 	type GuardSettings,
 } from "./guarded-executables.ts";
 
@@ -20,7 +22,10 @@ type ApprovalAttentionSettings = {
 	sound: { enabled: boolean; path: string | null };
 	integrations: { herdr: { enabled: boolean } };
 };
-type InfraCommandGuardSettings = ApprovalAttentionSettings & { guards: GuardSettings };
+type InfraCommandGuardSettings = ApprovalAttentionSettings & {
+	guards: GuardSettings;
+	commands: CommandOverrides;
+};
 
 const DEFAULT_ATTENTION_SETTINGS: ApprovalAttentionSettings = {
 	notifications: { enabled: false, backend: "auto" },
@@ -30,6 +35,7 @@ const DEFAULT_ATTENTION_SETTINGS: ApprovalAttentionSettings = {
 const DEFAULT_SETTINGS: InfraCommandGuardSettings = {
 	...DEFAULT_ATTENTION_SETTINGS,
 	guards: DEFAULT_GUARD_SETTINGS,
+	commands: DEFAULT_COMMAND_OVERRIDES,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -47,9 +53,25 @@ function expandConfigPath(path: string, configPath: string): string {
 	return isAbsolute(path) ? path : resolve(dirname(configPath), path);
 }
 
+function parseCommandRuleList(value: unknown, label: string): string[] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value)) throw new Error(`${label} must be an array of strings`);
+	if (value.length > 100) throw new Error(`${label} cannot contain more than 100 rules`);
+	return value.map((rule, index) => {
+		if (typeof rule !== "string") throw new Error(`${label}[${index}] must be a string`);
+		if (rule.length > 512) throw new Error(`${label}[${index}] cannot exceed 512 characters`);
+		const normalized = rule.trim().replace(/\s+/g, " ");
+		if (!normalized) throw new Error(`${label}[${index}] must not be empty`);
+		if (label.endsWith(".allow") && !normalized.replace(/[\s*]/g, "")) {
+			throw new Error(`${label}[${index}] must contain at least one literal character`);
+		}
+		return normalized;
+	});
+}
+
 function parseSettings(value: unknown, configPath: string): InfraCommandGuardSettings {
 	if (!isRecord(value)) throw new Error("configuration root must be a JSON object");
-	assertKnownKeys(value, ["$schema", "guards", "notifications", "sound", "integrations"], "configuration root");
+	assertKnownKeys(value, ["$schema", "guards", "commands", "notifications", "sound", "integrations"], "configuration root");
 
 	let guards: GuardSettings = DEFAULT_GUARD_SETTINGS;
 	const settings: InfraCommandGuardSettings = {
@@ -57,6 +79,7 @@ function parseSettings(value: unknown, configPath: string): InfraCommandGuardSet
 		sound: { ...DEFAULT_ATTENTION_SETTINGS.sound },
 		integrations: { herdr: { ...DEFAULT_ATTENTION_SETTINGS.integrations.herdr } },
 		guards,
+		commands: DEFAULT_COMMAND_OVERRIDES,
 	};
 
 	if (value.guards !== undefined) {
@@ -72,6 +95,29 @@ function parseSettings(value: unknown, configPath: string): InfraCommandGuardSet
 		}
 		guards = configuredGuards;
 		settings.guards = guards;
+	}
+
+	if (value.commands !== undefined) {
+		if (!isRecord(value.commands)) throw new Error("commands must be a JSON object");
+		assertKnownKeys(value.commands, [...GUARDED_EXECUTABLES], "commands");
+		const commands = { ...DEFAULT_COMMAND_OVERRIDES } as Record<(typeof GUARDED_EXECUTABLES)[number], {
+			allow: string[];
+			requireApproval: string[];
+		}>;
+		for (const executable of GUARDED_EXECUTABLES) {
+			const configured = value.commands[executable];
+			if (configured === undefined) continue;
+			if (!isRecord(configured)) throw new Error(`commands.${executable} must be a JSON object`);
+			assertKnownKeys(configured, ["allow", "requireApproval"], `commands.${executable}`);
+			commands[executable] = {
+				allow: parseCommandRuleList(configured.allow, `commands.${executable}.allow`),
+				requireApproval: parseCommandRuleList(
+					configured.requireApproval,
+					`commands.${executable}.requireApproval`,
+				),
+			};
+		}
+		settings.commands = commands;
 	}
 
 	if (value.notifications !== undefined) {
@@ -126,12 +172,16 @@ function parseSettings(value: unknown, configPath: string): InfraCommandGuardSet
 }
 
 function parseApprovalAttentionSettings(value: unknown, configPath: string): ApprovalAttentionSettings {
-	const { guards: _guards, ...attention } = parseSettings(value, configPath);
+	const { guards: _guards, commands: _commands, ...attention } = parseSettings(value, configPath);
 	return attention;
 }
 
 function parseGuardSettings(value: unknown, configPath: string): GuardSettings {
 	return parseSettings(value, configPath).guards;
+}
+
+function parseCommandOverrides(value: unknown, configPath: string): CommandOverrides {
+	return parseSettings(value, configPath).commands;
 }
 
 function loadSettings(configPath = join(getAgentDir(), CONFIG_FILE_NAME)): {
@@ -160,8 +210,21 @@ function loadApprovalAttentionSettings(configPath = join(getAgentDir(), CONFIG_F
 	error?: string;
 } {
 	const loaded = loadSettings(configPath);
-	const { guards: _guards, ...settings } = loaded.settings;
+	const { guards: _guards, commands: _commands, ...settings } = loaded.settings;
 	return { configPath: loaded.configPath, settings, ...(loaded.error ? { error: loaded.error } : {}) };
+}
+
+function loadPolicySettings(configPath = join(getAgentDir(), CONFIG_FILE_NAME)): {
+	configPath: string;
+	settings: { guards: GuardSettings; commands: CommandOverrides };
+	error?: string;
+} {
+	const loaded = loadSettings(configPath);
+	return {
+		configPath: loaded.configPath,
+		settings: { guards: loaded.settings.guards, commands: loaded.settings.commands },
+		...(loaded.error ? { error: loaded.error } : {}),
+	};
 }
 
 function loadGuardSettings(configPath = join(getAgentDir(), CONFIG_FILE_NAME)): {
@@ -442,8 +505,10 @@ async function requestApprovalAttention(
 export {
 	parseApprovalAttentionSettings,
 	parseGuardSettings,
+	parseCommandOverrides,
 	loadApprovalAttentionSettings,
 	loadGuardSettings,
+	loadPolicySettings,
 	detectTerminalNotificationBackend,
 	autoNotificationBackend,
 	isHerdrPane,

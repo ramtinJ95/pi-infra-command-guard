@@ -23,6 +23,21 @@
         "rm": { "type": "boolean", "default": true }
       }
     },
+    "commands": {
+      "type": "object",
+      "description": "Per-command overrides. Rules are normalized token prefixes and may use * within a token.",
+      "additionalProperties": false,
+      "properties": {
+        "kubectl": { "$ref": "#/$defs/commandOverrides" },
+        "terraform": { "$ref": "#/$defs/commandOverrides" },
+        "helm": { "$ref": "#/$defs/commandOverrides" },
+        "argocd": { "$ref": "#/$defs/commandOverrides" },
+        "aws": { "$ref": "#/$defs/commandOverrides" },
+        "az": { "$ref": "#/$defs/commandOverrides" },
+        "gcloud": { "$ref": "#/$defs/commandOverrides" },
+        "rm": { "$ref": "#/$defs/commandOverrides" }
+      }
+    },
     "notifications": {
       "type": "object",
       "additionalProperties": false,
@@ -84,6 +99,34 @@
               "default": true,
               "description": "Use native delivery for auto and Herdr's broker for explicit terminal delivery when running inside a Herdr pane."
             }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "commandOverrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "[^\\s*]"
+          }
+        },
+        "requireApproval": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "\\S"
           }
         }
       }

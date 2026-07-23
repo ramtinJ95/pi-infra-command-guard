@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import {
+	DEFAULT_COMMAND_OVERRIDES,
 	DEFAULT_GUARD_SETTINGS,
 	hasEnabledGuards,
+	type CommandOverrides,
 	type GuardSettings,
 } from "./guarded-executables.ts";
 import { evaluateCommand, isInteractiveInterpreterCommand } from "./policy.ts";
@@ -170,6 +172,7 @@ function guardExecution(
 	identity: ExecutionIdentity,
 	mode: string | undefined,
 	guardSettings: GuardSettings = DEFAULT_GUARD_SETTINGS,
+	commandOverrides: CommandOverrides = DEFAULT_COMMAND_OVERRIDES,
 ): { allow: true } | { allow: false; reason: string; requestId?: string | undefined } {
 	if (hasEnabledGuards(guardSettings) && identity.tty && isInteractiveInterpreterCommand(identity.command)) {
 		return {
@@ -179,7 +182,7 @@ function guardExecution(
 		};
 	}
 	if (store.consume(identity)) return { allow: true };
-	const decision = evaluateCommand(identity.command, guardSettings);
+	const decision = evaluateCommand(identity.command, guardSettings, commandOverrides);
 	if (decision.allow) return { allow: true };
 	if (mode !== "tui") {
 		return {

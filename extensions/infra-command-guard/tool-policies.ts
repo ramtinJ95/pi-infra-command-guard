@@ -1,4 +1,5 @@
 import { collectPositionals, normalizeForInfraScan, type Invocation } from "./shell.ts";
+import { type GuardedExecutable } from "./guarded-executables.ts";
 
 type AllowDecision = { allow: true; reason?: undefined };
 type ApprovalDecision = { allow: false; reason: string };
@@ -406,6 +407,53 @@ const ARGOCD_LEADING_VALUE_OPTIONS = new Set([
 	"--server-name",
 ]);
 
+const TOOL_GLOBAL_OPTIONS = {
+	argocd: { boolean: ARGOCD_LEADING_BOOLEAN_OPTIONS, value: ARGOCD_LEADING_VALUE_OPTIONS },
+	aws: { boolean: AWS_LEADING_BOOLEAN_OPTIONS, value: AWS_LEADING_VALUE_OPTIONS },
+	az: { boolean: AZ_LEADING_BOOLEAN_OPTIONS, value: AZ_LEADING_VALUE_OPTIONS },
+	gcloud: { boolean: GCLOUD_LEADING_BOOLEAN_OPTIONS, value: GCLOUD_LEADING_VALUE_OPTIONS },
+	helm: { boolean: HELM_LEADING_BOOLEAN_OPTIONS, value: HELM_LEADING_VALUE_OPTIONS },
+	kubectl: { boolean: KUBECTL_LEADING_BOOLEAN_OPTIONS, value: KUBECTL_LEADING_VALUE_OPTIONS },
+	rm: { boolean: new Set<string>(), value: new Set<string>() },
+	terraform: { boolean: TERRAFORM_LEADING_BOOLEAN_OPTIONS, value: TERRAFORM_LEADING_VALUE_OPTIONS },
+} satisfies Record<GuardedExecutable, { boolean: ReadonlySet<string>; value: ReadonlySet<string> }>;
+const COMMAND_LIKE_GLOBAL_OPTIONS = new Set(["-h", "--help", "-version", "--version"]);
+
+function normalizeOverrideArguments(executable: GuardedExecutable, args: string[]): string[] {
+	const options = TOOL_GLOBAL_OPTIONS[executable];
+	const normalized: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const word = args[index];
+		const name = optionName(word);
+		if (options.boolean.has(name)) {
+			if (COMMAND_LIKE_GLOBAL_OPTIONS.has(name)) normalized.push(word);
+			continue;
+		}
+		if (options.value.has(name)) {
+			if (!word.includes("=")) index += 1;
+			continue;
+		}
+		normalized.push(word);
+	}
+	return normalized;
+}
+
+function evaluateNonBypassableRisk(executable: GuardedExecutable, invocation: Invocation): PolicyDecision | undefined {
+	if (executable === "kubectl" && hasRawKubectlFlag(invocation.args)) {
+		return requireApproval("kubectl --raw is not on the low-risk allowlist");
+	}
+	if (executable === "gcloud" && hasOption(invocation.args, "--flags-file")) {
+		return requireApproval("gcloud --flags-file can hide behavior from lexical classification");
+	}
+	if (
+		executable === "helm" &&
+		invocation.args.some((arg) => arg === "--post-renderer" || arg.startsWith("--post-renderer="))
+	) {
+		return requireApproval("helm --post-renderer can execute an external program");
+	}
+	return undefined;
+}
+
 function isSecretLikeKubectlTarget(word: string): boolean {
 	const normalized = String(word || "").toLowerCase();
 	return normalized.split(",").some((piece) => {
@@ -775,5 +823,7 @@ export {
 	evaluateAws,
 	evaluateAz,
 	evaluateGcloud,
+	evaluateNonBypassableRisk,
+	normalizeOverrideArguments,
 };
 export type { AllowDecision, ApprovalDecision, PolicyDecision, ToolEvaluator };
