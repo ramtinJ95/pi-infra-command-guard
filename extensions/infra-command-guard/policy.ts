@@ -22,14 +22,18 @@ import {
 	evaluateArgocd,
 	evaluateAws,
 	evaluateAz,
+	evaluateFind,
 	evaluateGcloud,
 	evaluateHelm,
 	evaluateKubectl,
+	evaluateRsync,
 	evaluateTerraform,
+	evaluateAlwaysDestructive,
 	evaluateNonBypassableRisk,
 	isKubectlPortForwardOnlyCommand,
 	normalizeOverrideArguments,
 	requireApproval,
+	rsyncExecutableOptionValues,
 	type PolicyDecision,
 	type ToolEvaluator,
 } from "./tool-policies.ts";
@@ -38,12 +42,42 @@ const TOOL_EVALUATORS = {
 	argocd: evaluateArgocd,
 	aws: evaluateAws,
 	az: evaluateAz,
+	find: evaluateFind,
 	gcloud: evaluateGcloud,
 	helm: evaluateHelm,
 	kubectl: evaluateKubectl,
 	rm: () => requireApproval("rm command needs confirmation"),
+	rmdir: (invocation) => evaluateAlwaysDestructive("rmdir", invocation),
+	rsync: evaluateRsync,
+	shred: (invocation) => evaluateAlwaysDestructive("shred", invocation),
 	terraform: evaluateTerraform,
+	truncate: (invocation) => evaluateAlwaysDestructive("truncate", invocation),
+	unlink: (invocation) => evaluateAlwaysDestructive("unlink", invocation),
 } satisfies Record<GuardedExecutable, ToolEvaluator>;
+
+// Tool names added for narrow local-file actions are common search terms. Keep the
+// conservative bare-text fallback for the original infrastructure tools, while
+// still detecting every guarded executable in command position and shell runners.
+const INDIRECT_TEXT_GUARDS = new Set<GuardedExecutable>([
+	"argocd", "aws", "az", "gcloud", "helm", "kubectl", "rm", "terraform",
+]);
+const DEFAULT_ENABLED_INDIRECT_TEXT_GUARDS = GUARDED_EXECUTABLES.filter((executable) =>
+	INDIRECT_TEXT_GUARDS.has(executable)
+);
+const FIND_RUNNER_CODE_FLAGS: Readonly<Record<string, readonly string[]>> = {
+	bash: ["-c"],
+	dash: ["-c"],
+	fish: ["-c"],
+	node: ["-e", "--eval", "-p", "--print"],
+	perl: ["-e"],
+	python: ["-c"],
+	python3: ["-c"],
+	"python3.11": ["-c"],
+	"python3.12": ["-c"],
+	ruby: ["-e"],
+	sh: ["-c"],
+	zsh: ["-c"],
+};
 
 function toolEvaluator(executable: string): ToolEvaluator | undefined {
 	if (!Object.hasOwn(TOOL_EVALUATORS, executable)) return undefined;
@@ -89,6 +123,47 @@ function matchingCommandOverride(
 	return allowRule ? { action: "allow", rule: allowRule } : undefined;
 }
 
+function evaluateFindDelegatedCommands(
+	invocation: Invocation,
+	guardSettings: GuardSettings,
+	commandOverrides: CommandOverrides,
+): PolicyDecision | undefined {
+	const actions = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+	for (let index = 0; index < invocation.args.length; index += 1) {
+		if (!actions.has(invocation.args[index])) continue;
+		const end = invocation.args.findIndex((word, candidate) => candidate > index && (word === ";" || word === "+"));
+		const nestedWords = invocation.args.slice(index + 1, end === -1 ? undefined : end);
+		if (nestedWords.length === 0) continue;
+		const nestedInvocation = extractInvocation(nestedWords);
+		if (
+			!("error" in nestedInvocation) &&
+			(
+				nestedInvocation.executable?.includes("{}") ||
+				findRunnerCodeUsesPlaceholder(nestedInvocation)
+			)
+		) {
+			return requireApproval("find delegates execution through a path placeholder, which requires manual approval");
+		}
+		const nestedCommand = nestedWords.map((word) => JSON.stringify(word)).join(" ");
+		const decision = evaluateCommand(nestedCommand, guardSettings, commandOverrides);
+		if (!decision.allow) return decision;
+		if (end !== -1) index = end;
+	}
+	return undefined;
+}
+
+function findRunnerCodeUsesPlaceholder(invocation: Invocation): boolean {
+	const codeFlags = FIND_RUNNER_CODE_FLAGS[invocation.executable ?? ""] ?? [];
+	for (let index = 0; index < invocation.args.length; index += 1) {
+		const argument = invocation.args[index];
+		if (codeFlags.some((flag) => argument !== flag && argument.startsWith(flag))) {
+			return argument.includes("{}");
+		}
+		if (codeFlags.includes(argument) && invocation.args[index + 1]?.includes("{}")) return true;
+	}
+	return false;
+}
+
 function evaluateCommand(
 	command: string,
 	guardSettings: GuardSettings = DEFAULT_GUARD_SETTINGS,
@@ -102,7 +177,10 @@ function evaluateCommand(
 	if (hasDynamicExecutable(command)) {
 		return requireApproval("This command resolves its executable through a shell variable, which requires manual approval");
 	}
-	if (!containsGuardedText(command, enabledExecutables)) return allow();
+	const mentionsEnabledExecutable = containsGuardedText(command, enabledExecutables);
+	const mayDelegateThroughDisabledFind = !guardSettings.find && /-(?:exec|execdir|ok|okdir)\b/.test(command) &&
+		containsGuardedText(command, ["find"]);
+	if (!mentionsEnabledExecutable && !mayDelegateThroughDisabledFind) return allow();
 	const kubectlOverrides = commandOverrides.kubectl;
 	if (
 		guardSettings.kubectl &&
@@ -115,6 +193,9 @@ function evaluateCommand(
 	if ("error" in parsed) {
 		return requireApproval(`This command uses shell syntax the infra guard cannot classify safely (${parsed.error})`);
 	}
+	const enabledIndirectTextGuards = enabledExecutables === GUARDED_EXECUTABLES
+		? DEFAULT_ENABLED_INDIRECT_TEXT_GUARDS
+		: enabledExecutables.filter((executable) => INDIRECT_TEXT_GUARDS.has(executable));
 
 	for (const segment of parsed.segments) {
 		const invocation = extractInvocation(segment.words);
@@ -142,6 +223,16 @@ function evaluateCommand(
 		if (SHELL_RUNNERS.has(invocation.executable) && segmentMentionsGuardedTool) {
 			return requireApproval(`This command delegates guarded execution through ${invocation.executable}, which requires manual approval`);
 		}
+		if (invocation.executable === "find") {
+			const delegatedDecision = evaluateFindDelegatedCommands(invocation, guardSettings, commandOverrides);
+			if (delegatedDecision) return delegatedDecision;
+		}
+		if (invocation.executable === "rsync") {
+			const delegatedGuards = enabledExecutables.filter((executable) => executable !== "rsync");
+			if (rsyncExecutableOptionValues(invocation.args).some((value) => containsGuardedText(value, delegatedGuards))) {
+				return requireApproval("rsync executable option delegates to guarded tooling, which requires manual approval");
+			}
+		}
 
 		const evaluator = toolEvaluator(invocation.executable);
 		if (evaluator) {
@@ -164,7 +255,7 @@ function evaluateCommand(
 			continue;
 		}
 
-		if (containsGuardedText(segment.bare, enabledExecutables)) {
+		if (containsGuardedText(segment.bare, enabledIndirectTextGuards)) {
 			return requireApproval(
 				`This command invokes guarded tooling through ${invocation.executable}, which requires manual approval`,
 			);
@@ -190,6 +281,8 @@ export {
 	evaluateAws,
 	evaluateAz,
 	evaluateGcloud,
+	evaluateFind,
+	evaluateRsync,
 } from "./tool-policies.ts";
 export { evaluateCommand };
 export type { PolicyDecision } from "./tool-policies.ts";

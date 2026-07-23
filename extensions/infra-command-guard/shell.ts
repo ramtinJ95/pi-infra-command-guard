@@ -328,6 +328,13 @@ function parseSimpleCommands(command: string): ParsedCommands {
 			continue;
 		}
 
+		if (ch === "{" && next === "}") {
+			add(ch, false);
+			add(next, false);
+			i += 1;
+			continue;
+		}
+
 		if (ch === "(" || ch === ")" || ch === "{" || ch === "}") {
 			return { error: `Unsupported shell grouping token: ${ch}` };
 		}
@@ -386,6 +393,22 @@ function extractInvocation(words: string[]): InvocationResult {
 
 		const rawExecutable = words[index];
 		const executable = stripPath(rawExecutable);
+
+		if (executable === "toybox") {
+			let appletIndex = index + 1;
+			while (words[appletIndex] === "--long") appletIndex += 1;
+			if (words[appletIndex] && !words[appletIndex].startsWith("-")) {
+				wrappers.push(executable);
+				index = appletIndex;
+				continue;
+			}
+		}
+
+		if (executable === "busybox" && words[index + 1] && !words[index + 1].startsWith("-")) {
+			wrappers.push(executable);
+			index += 1;
+			continue;
+		}
 
 		if (executable === "env") {
 			wrappers.push(executable);

@@ -1,10 +1,17 @@
 import { collectPositionals, normalizeForInfraScan, type Invocation } from "./shell.ts";
-import { type GuardedExecutable } from "./guarded-executables.ts";
+import { GUARDED_EXECUTABLES, type GuardedExecutable } from "./guarded-executables.ts";
 
 type AllowDecision = { allow: true; reason?: undefined };
 type ApprovalDecision = { allow: false; reason: string };
 type PolicyDecision = AllowDecision | ApprovalDecision;
 type ToolEvaluator = (invocation: Invocation) => PolicyDecision;
+
+const OTHER_GUARDED_EXECUTABLE_PATTERN = new RegExp(
+	`\\b(?:${GUARDED_EXECUTABLES.filter((executable) => executable !== "kubectl").join("|")})\\b`,
+);
+const RSYNC_DELEGATED_GUARDED_PATTERN = new RegExp(
+	`\\b(?:${GUARDED_EXECUTABLES.filter((executable) => executable !== "rsync").join("|")})\\b`,
+);
 
 const SAFE_KUBECTL_TOP_LEVEL = new Set([
 	"api-resources",
@@ -411,11 +418,17 @@ const TOOL_GLOBAL_OPTIONS = {
 	argocd: { boolean: ARGOCD_LEADING_BOOLEAN_OPTIONS, value: ARGOCD_LEADING_VALUE_OPTIONS },
 	aws: { boolean: AWS_LEADING_BOOLEAN_OPTIONS, value: AWS_LEADING_VALUE_OPTIONS },
 	az: { boolean: AZ_LEADING_BOOLEAN_OPTIONS, value: AZ_LEADING_VALUE_OPTIONS },
+	find: { boolean: new Set<string>(), value: new Set<string>() },
 	gcloud: { boolean: GCLOUD_LEADING_BOOLEAN_OPTIONS, value: GCLOUD_LEADING_VALUE_OPTIONS },
 	helm: { boolean: HELM_LEADING_BOOLEAN_OPTIONS, value: HELM_LEADING_VALUE_OPTIONS },
 	kubectl: { boolean: KUBECTL_LEADING_BOOLEAN_OPTIONS, value: KUBECTL_LEADING_VALUE_OPTIONS },
 	rm: { boolean: new Set<string>(), value: new Set<string>() },
+	rmdir: { boolean: new Set<string>(), value: new Set<string>() },
+	rsync: { boolean: new Set<string>(), value: new Set<string>() },
+	shred: { boolean: new Set<string>(), value: new Set<string>() },
 	terraform: { boolean: TERRAFORM_LEADING_BOOLEAN_OPTIONS, value: TERRAFORM_LEADING_VALUE_OPTIONS },
+	truncate: { boolean: new Set<string>(), value: new Set<string>() },
+	unlink: { boolean: new Set<string>(), value: new Set<string>() },
 } satisfies Record<GuardedExecutable, { boolean: ReadonlySet<string>; value: ReadonlySet<string> }>;
 const COMMAND_LIKE_GLOBAL_OPTIONS = new Set(["-h", "--help", "-version", "--version"]);
 
@@ -451,6 +464,7 @@ function evaluateNonBypassableRisk(executable: GuardedExecutable, invocation: In
 	) {
 		return requireApproval("helm --post-renderer can execute an external program");
 	}
+	if (executable === "rsync") return evaluateRsyncExecutableOptionRisk(invocation);
 	return undefined;
 }
 
@@ -470,7 +484,7 @@ function isKubectlPortForwardOnlyCommand(command: string): boolean {
 	const normalized = normalizeForInfraScan(command).toLowerCase();
 	const kubectlMentions = normalized.match(/\bkubectl\b(?=[\s;|&()<>]|$)/g) || [];
 	if (kubectlMentions.length === 0) return false;
-	if (/\b(?:terraform|helm|argocd|az|aws|gcloud|rm)\b/.test(normalized)) return false;
+	if (OTHER_GUARDED_EXECUTABLE_PATTERN.test(normalized)) return false;
 	const kubectlPortForwardMentions =
 		normalized.match(/\bkubectl\b(?=[\s;|&()<>]|$)(?:(?!&&|\|\||[;&|\n]).)*\bport-forward\b/g) || [];
 	return kubectlPortForwardMentions.length === kubectlMentions.length;
@@ -487,6 +501,148 @@ function allow(): AllowDecision {
 function optionName(word: string): string {
 	const equalsIndex = word.indexOf("=");
 	return equalsIndex === -1 ? word : word.slice(0, equalsIndex);
+}
+
+const HELP_OR_VERSION_ARGUMENTS = new Set(["--help", "--version"]);
+const RSYNC_DELETION_OPTIONS = new Set([
+	"--del",
+	"--delete",
+	"--delete-after",
+	"--delete-before",
+	"--delete-delay",
+	"--delete-during",
+	"--delete-excluded",
+	"--delete-missing-args",
+	"--remove-sent-files",
+	"--remove-source-files",
+]);
+const RSYNC_LONG_VALUE_OPTIONS = new Set([
+	"--address", "--backup-dir", "--block-size", "--bwlimit", "--chown", "--chmod", "--compare-dest",
+	"--checksum-choice", "--checksum-seed", "--compress-choice", "--compress-level", "--config", "--contimeout",
+	"--copy-as", "--copy-dest", "--debug", "--early-input", "--exclude", "--exclude-from", "--files-from",
+	"--filter", "--groupmap", "--iconv", "--include", "--include-from", "--info", "--link-dest", "--log-file",
+	"--log-file-format", "--log-format", "--max-alloc", "--max-delete", "--max-size", "--min-size",
+	"--modify-window", "--only-write-batch", "--out-format", "--partial-dir", "--password-file", "--port",
+	"--protocol", "--read-batch", "--remote-option", "--rsync-path", "--rsh", "--skip-compress", "--sockopts",
+	"--stderr", "--stop-after", "--stop-at", "--suffix", "--temp-dir", "--timeout", "--usermap", "--write-batch",
+]);
+const RSYNC_SHORT_VALUE_OPTIONS = new Set(["B", "e", "f", "M", "T"]);
+
+function matchesRsyncLongOption(name: string, candidate: string): boolean {
+	return name === candidate || (name.length >= 4 && candidate.startsWith(name));
+}
+
+function isRsyncLongValueOption(name: string): boolean {
+	return [...RSYNC_LONG_VALUE_OPTIONS].some((candidate) => matchesRsyncLongOption(name, candidate));
+}
+
+function matchingRsyncDeletionOptions(option: string): string[] {
+	if (RSYNC_DELETION_OPTIONS.has(option)) return [option];
+	if (option.length < 4) return [];
+	return [...RSYNC_DELETION_OPTIONS].filter((candidate) => candidate.startsWith(option));
+}
+
+function analyzeRsyncOptions(args: string[]): { destructive: string | undefined; dryRun: boolean } {
+	let dryRun = false;
+	const enabledDeletionOptions = new Set<string>();
+	for (let index = 0; index < args.length; index += 1) {
+		const word = args[index];
+		if (word === "--") break;
+		if (word.startsWith("--")) {
+			const name = optionName(word);
+			if (matchesRsyncLongOption(name, "--dry-run")) dryRun = true;
+			if (matchesRsyncLongOption(name, "--no-dry-run")) dryRun = false;
+			if (name.startsWith("--no-")) {
+				const negated = matchingRsyncDeletionOptions(`--${name.slice(5)}`);
+				if (negated.includes("--delete") || negated.includes("--del")) {
+					for (const option of enabledDeletionOptions) {
+						if (option.startsWith("--del")) enabledDeletionOptions.delete(option);
+					}
+				} else if (negated.some((option) => option.startsWith("--remove-"))) {
+					for (const option of enabledDeletionOptions) {
+						if (option.startsWith("--remove-")) enabledDeletionOptions.delete(option);
+					}
+				} else {
+					for (const option of negated) enabledDeletionOptions.delete(option);
+				}
+			} else {
+				for (const option of matchingRsyncDeletionOptions(name)) enabledDeletionOptions.add(option);
+			}
+			if (!word.includes("=") && isRsyncLongValueOption(name)) index += 1;
+			continue;
+		}
+		if (!word.startsWith("-") || word === "-") continue;
+		const shortOptions = word.slice(1);
+		for (let shortIndex = 0; shortIndex < shortOptions.length; shortIndex += 1) {
+			const shortOption = shortOptions[shortIndex];
+			if (shortOption === "n") dryRun = true;
+			if (!RSYNC_SHORT_VALUE_OPTIONS.has(shortOption)) continue;
+			if (shortIndex === shortOptions.length - 1) index += 1;
+			break;
+		}
+	}
+	return { destructive: enabledDeletionOptions.values().next().value, dryRun };
+}
+
+function rsyncExecutableOptionValues(args: string[]): string[] {
+	const values: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const word = args[index];
+		if (word === "--") break;
+		if (word.startsWith("--")) {
+			const name = optionName(word);
+			if (matchesRsyncLongOption(name, "--rsh") || matchesRsyncLongOption(name, "--rsync-path")) {
+				const value = word.includes("=") ? word.slice(word.indexOf("=") + 1) : args[index += 1];
+				if (value !== undefined) values.push(value);
+				continue;
+			}
+			if (!word.includes("=") && isRsyncLongValueOption(name)) index += 1;
+			continue;
+		}
+		if (!word.startsWith("-") || word === "-") continue;
+		const shortOptions = word.slice(1);
+		for (let shortIndex = 0; shortIndex < shortOptions.length; shortIndex += 1) {
+			const shortOption = shortOptions[shortIndex];
+			if (!RSYNC_SHORT_VALUE_OPTIONS.has(shortOption)) continue;
+			const attached = shortOptions.slice(shortIndex + 1).replace(/^=/, "");
+			const value = attached || args[index += 1];
+			if (shortOption === "e" && value !== undefined) values.push(value);
+			break;
+		}
+	}
+	return values;
+}
+
+function evaluateRsyncExecutableOptionRisk(invocation: Invocation): PolicyDecision | undefined {
+	for (const executableValue of rsyncExecutableOptionValues(invocation.args)) {
+		if (
+			/[;&|`$()<>\r\n]/.test(executableValue) ||
+			/\b(?:bash|busybox|dash|eval|exec|fish|node|perl|python|python3|ruby|sh|toybox|zsh)\b/.test(executableValue) ||
+			RSYNC_DELEGATED_GUARDED_PATTERN.test(normalizeForInfraScan(executableValue).toLowerCase())
+		) {
+			return requireApproval("rsync executable option can run behavior hidden from command policy");
+		}
+	}
+	return undefined;
+}
+
+function evaluateAlwaysDestructive(executable: "rmdir" | "shred" | "truncate" | "unlink", invocation: Invocation): PolicyDecision {
+	if (invocation.args.length === 1 && HELP_OR_VERSION_ARGUMENTS.has(invocation.args[0])) return allow();
+	return requireApproval(`${executable} command needs confirmation`);
+}
+
+function evaluateFind(invocation: Invocation): PolicyDecision {
+	if (invocation.args.includes("-delete")) return requireApproval("find -delete command needs confirmation");
+	return allow();
+}
+
+function evaluateRsync(invocation: Invocation): PolicyDecision {
+	const executableOptionRisk = evaluateRsyncExecutableOptionRisk(invocation);
+	if (executableOptionRisk) return executableOptionRisk;
+	const { destructive, dryRun } = analyzeRsyncOptions(invocation.args);
+	if (dryRun) return allow();
+	if (destructive) return requireApproval(`rsync ${destructive} command needs confirmation`);
+	return allow();
 }
 
 function actionStartsWith(action: string, candidates: ReadonlySet<string>): boolean {
@@ -822,8 +978,12 @@ export {
 	evaluateArgocd,
 	evaluateAws,
 	evaluateAz,
+	evaluateFind,
 	evaluateGcloud,
+	evaluateRsync,
+	evaluateAlwaysDestructive,
 	evaluateNonBypassableRisk,
 	normalizeOverrideArguments,
+	rsyncExecutableOptionValues,
 };
 export type { AllowDecision, ApprovalDecision, PolicyDecision, ToolEvaluator };

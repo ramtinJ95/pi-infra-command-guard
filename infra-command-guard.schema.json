@@ -20,7 +20,13 @@
         "aws": { "type": "boolean", "default": true },
         "az": { "type": "boolean", "default": true },
         "gcloud": { "type": "boolean", "default": true },
-        "rm": { "type": "boolean", "default": true }
+        "find": { "type": "boolean", "default": true },
+        "rm": { "type": "boolean", "default": true },
+        "rmdir": { "type": "boolean", "default": true },
+        "rsync": { "type": "boolean", "default": true },
+        "shred": { "type": "boolean", "default": true },
+        "truncate": { "type": "boolean", "default": true },
+        "unlink": { "type": "boolean", "default": true }
       }
     },
     "commands": {
@@ -35,7 +41,13 @@
         "aws": { "$ref": "#/$defs/commandOverrides" },
         "az": { "$ref": "#/$defs/commandOverrides" },
         "gcloud": { "$ref": "#/$defs/commandOverrides" },
-        "rm": { "$ref": "#/$defs/commandOverrides" }
+        "find": { "$ref": "#/$defs/commandOverrides" },
+        "rm": { "$ref": "#/$defs/commandOverrides" },
+        "rmdir": { "$ref": "#/$defs/commandOverrides" },
+        "rsync": { "$ref": "#/$defs/commandOverrides" },
+        "shred": { "$ref": "#/$defs/commandOverrides" },
+        "truncate": { "$ref": "#/$defs/commandOverrides" },
+        "unlink": { "$ref": "#/$defs/commandOverrides" }
       }
     },
     "notifications": {
