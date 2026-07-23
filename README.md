@@ -1,6 +1,6 @@
 # infra-command-guard
 
-Global pi extension that wraps the built-in `bash` tool and intercepts direct and GPT-5.6 Code Mode `exec_command` calls, asking for approval before running higher-risk `kubectl`, `terraform`, `helm`, `argocd`, and `rm` commands.
+Global pi extension that wraps the built-in `bash` tool and intercepts direct and GPT-5.6 Code Mode `exec_command` calls, asking for approval before running higher-risk `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, and `rm` commands.
 
 ## Install
 
@@ -87,16 +87,28 @@ Explicitly low-risk operations including:
 
 `argocd app diff` and `app manifests` remain guarded because rendered output can expose secret material.
 
+### AWS CLI
+
+Read-style service operations such as `describe-*`, `get-*`, `list-*`, `head-*`, `search-*`, `scan`, `query`, and waiters are allowed. Explicit diagnostics and content reads include CloudWatch Logs filtering/tailing, S3 Select, RDS log download, Route 53 DNS tests, and CloudFormation cost estimation. Sensitive exceptions remain guarded, including Secrets Manager reads, SSM parameter-value retrieval, credential/token retrieval, and STS operations other than `get-caller-identity`. Unknown operations fail closed.
+
+### Azure CLI
+
+Stable commands with explicit read-style actions such as `list`, `show`, `get-*`, `exists`, `query`, diagnostics/tests, log tailing, patch assessment, `status`, `validate`, `wait`, and deployment `what-if` are allowed. Secret, credential, key-value, connection-string, and app-setting reads remain guarded. Mutating or unknown actions fail closed.
+
+### Google Cloud CLI
+
+Stable commands with explicit read-style actions such as `list`, `describe`, `get-*`, `read`, `search-*`, logs, storage `cat`/`du`/`hash`, IAM policy troubleshooting, `status`, and operation waits are allowed. Authentication-token output, credential retrieval, and Secret Manager reads remain guarded. `alpha`, `beta`, `--flags-file`, mutating, and unknown commands fail closed.
+
 ## What requires approval
 
-- Mutating infra commands such as `kubectl delete`, `terraform apply`, `helm upgrade`, and `argocd app sync`
+- Mutating infra commands such as `kubectl delete`, `terraform apply`, `helm upgrade`, `argocd app sync`, `aws ec2 terminate-instances`, `az vm delete`, and `gcloud compute instances delete`
 - `rm` commands
 - Wrapped or path-qualified `rm` commands such as `sudo rm`, `env rm`, and `/bin/rm`
 - Executables resolved through shell variables, such as `$TOOL ...`
 - Assignment-based indirection such as `K=kubectl; $K ...`
 - Commands the guard cannot classify safely
 - Indirect shell-runner patterns such as `bash -lc "kubectl ..."` or `xargs kubectl ...`, except for commands whose kubectl usage is limited to `port-forward`
-- Some sensitive read paths, e.g. `kubectl get secret ...`
+- Some sensitive read paths, e.g. Kubernetes secrets, cloud secret values, credentials, tokens, keys, and connection strings
 
 ## Approval flow
 
@@ -231,4 +243,7 @@ From the repository root:
 npm install
 npm test
 npm run test:package
+npm run benchmark:policy
 ```
+
+The cloud policy corpus covers hundreds of documented read, mutation, sensitive-read, authentication, and local-configuration decisions. Each decision is exercised through path-qualified executables, wrappers, global-option placements, shell composition, pipelines, and simple executable obfuscation.
