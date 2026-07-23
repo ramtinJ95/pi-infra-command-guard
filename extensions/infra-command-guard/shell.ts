@@ -1,6 +1,7 @@
 import { GUARDED_EXECUTABLES } from "./guarded-executables.ts";
 
-const GUARDED_PATTERN = new RegExp(`\\b(?:${GUARDED_EXECUTABLES.join("|")})\\b`, "i");
+const GUARDED_PATTERNS = new Map<string, RegExp>();
+const DEFAULT_GUARDED_PATTERN = new RegExp(`\\b(?:${GUARDED_EXECUTABLES.join("|")})\\b`, "i");
 
 type ShellSegment = { words: string[]; bare: string };
 type ParsedCommands =
@@ -129,8 +130,21 @@ function normalizeForInfraScan(text: string): string {
 	return String(text || "").replace(/["'\\]/g, "");
 }
 
-function containsGuardedText(text: string): boolean {
-	return GUARDED_PATTERN.test(normalizeForInfraScan(text));
+function containsGuardedText(
+	text: string,
+	guardedExecutables: readonly string[] = GUARDED_EXECUTABLES,
+): boolean {
+	if (guardedExecutables.length === 0) return false;
+	if (guardedExecutables === GUARDED_EXECUTABLES) {
+		return DEFAULT_GUARDED_PATTERN.test(normalizeForInfraScan(text));
+	}
+	const key = guardedExecutables.join("\0");
+	let pattern = GUARDED_PATTERNS.get(key);
+	if (!pattern) {
+		pattern = new RegExp(`\\b(?:${guardedExecutables.join("|")})\\b`, "i");
+		GUARDED_PATTERNS.set(key, pattern);
+	}
+	return pattern.test(normalizeForInfraScan(text));
 }
 
 function hasDynamicExecutable(command: string): boolean {

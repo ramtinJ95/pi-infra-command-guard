@@ -8,6 +8,21 @@
     "$schema": {
       "type": "string"
     },
+    "guards": {
+      "type": "object",
+      "description": "Per-command guard overrides. Every guard defaults to enabled when omitted.",
+      "additionalProperties": false,
+      "properties": {
+        "kubectl": { "type": "boolean", "default": true },
+        "terraform": { "type": "boolean", "default": true },
+        "helm": { "type": "boolean", "default": true },
+        "argocd": { "type": "boolean", "default": true },
+        "aws": { "type": "boolean", "default": true },
+        "az": { "type": "boolean", "default": true },
+        "gcloud": { "type": "boolean", "default": true },
+        "rm": { "type": "boolean", "default": true }
+      }
+    },
     "notifications": {
       "type": "object",
       "additionalProperties": false,

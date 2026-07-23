@@ -3,6 +3,11 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	DEFAULT_GUARD_SETTINGS,
+	GUARDED_EXECUTABLES,
+	type GuardSettings,
+} from "./guarded-executables.ts";
 
 const CONFIG_FILE_NAME = "infra-command-guard.json";
 
@@ -15,11 +20,16 @@ type ApprovalAttentionSettings = {
 	sound: { enabled: boolean; path: string | null };
 	integrations: { herdr: { enabled: boolean } };
 };
+type InfraCommandGuardSettings = ApprovalAttentionSettings & { guards: GuardSettings };
 
 const DEFAULT_ATTENTION_SETTINGS: ApprovalAttentionSettings = {
 	notifications: { enabled: false, backend: "auto" },
 	sound: { enabled: false, path: null },
 	integrations: { herdr: { enabled: true } },
+};
+const DEFAULT_SETTINGS: InfraCommandGuardSettings = {
+	...DEFAULT_ATTENTION_SETTINGS,
+	guards: DEFAULT_GUARD_SETTINGS,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -37,15 +47,32 @@ function expandConfigPath(path: string, configPath: string): string {
 	return isAbsolute(path) ? path : resolve(dirname(configPath), path);
 }
 
-function parseApprovalAttentionSettings(value: unknown, configPath: string): ApprovalAttentionSettings {
+function parseSettings(value: unknown, configPath: string): InfraCommandGuardSettings {
 	if (!isRecord(value)) throw new Error("configuration root must be a JSON object");
-	assertKnownKeys(value, ["$schema", "notifications", "sound", "integrations"], "configuration root");
+	assertKnownKeys(value, ["$schema", "guards", "notifications", "sound", "integrations"], "configuration root");
 
-	const settings: ApprovalAttentionSettings = {
+	let guards: GuardSettings = DEFAULT_GUARD_SETTINGS;
+	const settings: InfraCommandGuardSettings = {
 		notifications: { ...DEFAULT_ATTENTION_SETTINGS.notifications },
 		sound: { ...DEFAULT_ATTENTION_SETTINGS.sound },
 		integrations: { herdr: { ...DEFAULT_ATTENTION_SETTINGS.integrations.herdr } },
+		guards,
 	};
+
+	if (value.guards !== undefined) {
+		if (!isRecord(value.guards)) throw new Error("guards must be a JSON object");
+		assertKnownKeys(value.guards, [...GUARDED_EXECUTABLES], "guards");
+		const configuredGuards = { ...DEFAULT_GUARD_SETTINGS } as Record<(typeof GUARDED_EXECUTABLES)[number], boolean>;
+		for (const executable of GUARDED_EXECUTABLES) {
+			const configured = value.guards[executable];
+			if (configured !== undefined && typeof configured !== "boolean") {
+				throw new Error(`guards.${executable} must be true or false`);
+			}
+			configuredGuards[executable] = configured ?? configuredGuards[executable];
+		}
+		guards = configuredGuards;
+		settings.guards = guards;
+	}
 
 	if (value.notifications !== undefined) {
 		if (!isRecord(value.notifications)) throw new Error("notifications must be a JSON object");
@@ -98,24 +125,56 @@ function parseApprovalAttentionSettings(value: unknown, configPath: string): App
 	return settings;
 }
 
+function parseApprovalAttentionSettings(value: unknown, configPath: string): ApprovalAttentionSettings {
+	const { guards: _guards, ...attention } = parseSettings(value, configPath);
+	return attention;
+}
+
+function parseGuardSettings(value: unknown, configPath: string): GuardSettings {
+	return parseSettings(value, configPath).guards;
+}
+
+function loadSettings(configPath = join(getAgentDir(), CONFIG_FILE_NAME)): {
+	configPath: string;
+	settings: InfraCommandGuardSettings;
+	error?: string;
+} {
+	try {
+		const source = readFileSync(configPath, "utf8");
+		return { configPath, settings: parseSettings(JSON.parse(source), configPath) };
+	} catch (error: unknown) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+			return { configPath, settings: DEFAULT_SETTINGS };
+		}
+		return {
+			configPath,
+			settings: DEFAULT_SETTINGS,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
 function loadApprovalAttentionSettings(configPath = join(getAgentDir(), CONFIG_FILE_NAME)): {
 	configPath: string;
 	settings: ApprovalAttentionSettings;
 	error?: string;
 } {
-	try {
-		const source = readFileSync(configPath, "utf8");
-		return { configPath, settings: parseApprovalAttentionSettings(JSON.parse(source), configPath) };
-	} catch (error: unknown) {
-		if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-			return { configPath, settings: DEFAULT_ATTENTION_SETTINGS };
-		}
-		return {
-			configPath,
-			settings: DEFAULT_ATTENTION_SETTINGS,
-			error: error instanceof Error ? error.message : String(error),
-		};
-	}
+	const loaded = loadSettings(configPath);
+	const { guards: _guards, ...settings } = loaded.settings;
+	return { configPath: loaded.configPath, settings, ...(loaded.error ? { error: loaded.error } : {}) };
+}
+
+function loadGuardSettings(configPath = join(getAgentDir(), CONFIG_FILE_NAME)): {
+	configPath: string;
+	settings: GuardSettings;
+	error?: string;
+} {
+	const loaded = loadSettings(configPath);
+	return {
+		configPath: loaded.configPath,
+		settings: loaded.settings.guards,
+		...(loaded.error ? { error: loaded.error } : {}),
+	};
 }
 
 function notifyAttentionFailure(ctx: AttentionContext, label: string): void {
@@ -382,7 +441,9 @@ async function requestApprovalAttention(
 
 export {
 	parseApprovalAttentionSettings,
+	parseGuardSettings,
 	loadApprovalAttentionSettings,
+	loadGuardSettings,
 	detectTerminalNotificationBackend,
 	autoNotificationBackend,
 	isHerdrPane,

@@ -7,7 +7,13 @@ import {
 	hasDynamicExecutable,
 	parseSimpleCommands,
 } from "./shell.ts";
-import { type GuardedExecutable } from "./guarded-executables.ts";
+import {
+	DEFAULT_GUARD_SETTINGS,
+	GUARDED_EXECUTABLES,
+	enabledGuardedExecutables,
+	type GuardedExecutable,
+	type GuardSettings,
+} from "./guarded-executables.ts";
 import {
 	allow,
 	evaluateArgocd,
@@ -39,12 +45,20 @@ function toolEvaluator(executable: string): ToolEvaluator | undefined {
 	return TOOL_EVALUATORS[executable as GuardedExecutable];
 }
 
-function evaluateCommand(command: string): PolicyDecision {
+function evaluateCommand(
+	command: string,
+	guardSettings: GuardSettings = DEFAULT_GUARD_SETTINGS,
+): PolicyDecision {
+	const enabledExecutables = guardSettings === DEFAULT_GUARD_SETTINGS
+		? GUARDED_EXECUTABLES
+		: enabledGuardedExecutables(guardSettings);
+	if (enabledExecutables.length === 0) return allow();
+
 	if (hasDynamicExecutable(command)) {
 		return requireApproval("This command resolves its executable through a shell variable, which requires manual approval");
 	}
-	if (!containsGuardedText(command)) return allow();
-	if (isKubectlPortForwardOnlyCommand(command)) return allow();
+	if (!containsGuardedText(command, enabledExecutables)) return allow();
+	if (guardSettings.kubectl && isKubectlPortForwardOnlyCommand(command)) return allow();
 
 	const parsed = parseSimpleCommands(command);
 	if ("error" in parsed) {
@@ -58,7 +72,7 @@ function evaluateCommand(command: string): PolicyDecision {
 		}
 
 		if (!invocation.executable) {
-			if (containsGuardedText(segment.words.join(" "))) {
+			if (containsGuardedText(segment.words.join(" "), enabledExecutables)) {
 				return requireApproval("This command assigns guarded tooling for indirect shell execution, which requires manual approval");
 			}
 			continue;
@@ -73,19 +87,21 @@ function evaluateCommand(command: string): PolicyDecision {
 		}
 
 		const segmentText = segment.words.join(" ");
-		const segmentMentionsGuardedTool = containsGuardedText(segmentText);
+		const segmentMentionsGuardedTool = containsGuardedText(segmentText, enabledExecutables);
 		if (SHELL_RUNNERS.has(invocation.executable) && segmentMentionsGuardedTool) {
 			return requireApproval(`This command delegates guarded execution through ${invocation.executable}, which requires manual approval`);
 		}
 
 		const evaluator = toolEvaluator(invocation.executable);
 		if (evaluator) {
-			const decision = evaluator(invocation);
-			if (!decision.allow) return decision;
+			if (guardSettings[invocation.executable as GuardedExecutable]) {
+				const decision = evaluator(invocation);
+				if (!decision.allow) return decision;
+			}
 			continue;
 		}
 
-		if (containsGuardedText(segment.bare)) {
+		if (containsGuardedText(segment.bare, enabledExecutables)) {
 			return requireApproval(
 				`This command invokes guarded tooling through ${invocation.executable}, which requires manual approval`,
 			);

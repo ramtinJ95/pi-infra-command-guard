@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import {
+	DEFAULT_GUARD_SETTINGS,
+	hasEnabledGuards,
+	type GuardSettings,
+} from "./guarded-executables.ts";
 import { evaluateCommand, isInteractiveInterpreterCommand } from "./policy.ts";
 
 const APPROVAL_STORE_KEY = Symbol.for("infra-command-guard.approval-store.v1");
@@ -106,6 +111,11 @@ class ApprovalStore {
 		this.pending.delete(requestId);
 	}
 
+	clear(): void {
+		this.pending.clear();
+		this.approved.clear();
+	}
+
 	consume(identity: ExecutionIdentity): boolean {
 		this.prune();
 		const key = executionFingerprint(identity);
@@ -159,8 +169,9 @@ function guardExecution(
 	store: ApprovalStore,
 	identity: ExecutionIdentity,
 	mode: string | undefined,
+	guardSettings: GuardSettings = DEFAULT_GUARD_SETTINGS,
 ): { allow: true } | { allow: false; reason: string; requestId?: string | undefined } {
-	if (identity.tty && isInteractiveInterpreterCommand(identity.command)) {
+	if (hasEnabledGuards(guardSettings) && identity.tty && isInteractiveInterpreterCommand(identity.command)) {
 		return {
 			allow: false,
 			reason:
@@ -168,7 +179,7 @@ function guardExecution(
 		};
 	}
 	if (store.consume(identity)) return { allow: true };
-	const decision = evaluateCommand(identity.command);
+	const decision = evaluateCommand(identity.command, guardSettings);
 	if (decision.allow) return { allow: true };
 	if (mode !== "tui") {
 		return {
