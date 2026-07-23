@@ -203,7 +203,7 @@ test("stale approval tool closures follow the current reload store", async () =>
 	assert.match(result.content[0].text, /TUI approval UI is not available/);
 });
 
-test("extension reloads guard toggles from config for each command", async () => {
+test("extension reloads guard toggles and command rules for each command", async () => {
 	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-extension-"));
 	const configPath = join(directory, "infra-command-guard.json");
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -229,6 +229,11 @@ test("extension reloads guard toggles from config for each command", async () =>
 
 		writeFileSync(configPath, JSON.stringify({ guards: { rm: false } }));
 		assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: "rm disabled" } }, context), undefined);
+		writeFileSync(configPath, JSON.stringify({
+			guards: { rm: false },
+			commands: { rm: { requireApproval: ["disabled"] } },
+		}));
+		assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: "rm disabled" } }, context), undefined);
 
 		writeFileSync(configPath, JSON.stringify({ guards: { rm: true } }));
 		const enabled = await toolCall({ toolName: "exec_command", input: { cmd: "rm enabled" } }, context) as { block: boolean; reason: string };
@@ -241,6 +246,16 @@ test("extension reloads guard toggles from config for each command", async () =>
 
 		writeFileSync(configPath, JSON.stringify({ guards: ALL_GUARDS_DISABLED }));
 		assert.equal(await toolCall({ toolName: "exec", input: { code: "dynamic" } }, context), undefined);
+
+		writeFileSync(configPath, JSON.stringify({ commands: { rm: { allow: ["custom-target"] } } }));
+		assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: "rm custom-target" } }, context), undefined);
+		writeFileSync(configPath, JSON.stringify({ commands: { rm: { requireApproval: ["custom-target"] } } }));
+		const customRequired = await toolCall(
+			{ toolName: "exec_command", input: { cmd: "rm custom-target" } },
+			context,
+		) as { block: boolean; reason: string };
+		assert.equal(customRequired.block, true);
+		assert.match(customRequired.reason, /Custom command rule requires approval/);
 
 		writeFileSync(configPath, JSON.stringify({ guards: { rm: "off" } }));
 		const invalid = await toolCall({ toolName: "exec_command", input: { cmd: "rm enabled" } }, context) as { block: boolean };
@@ -256,7 +271,7 @@ test("extension reloads guard toggles from config for each command", async () =>
 	}
 });
 
-test("Code Mode remains intercepted across disabled-to-enabled config transitions", async () => {
+test("Code Mode reloads guard toggles and command rules without losing interception", async () => {
 	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-code-mode-config-"));
 	const configPath = join(directory, "infra-command-guard.json");
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -299,12 +314,22 @@ test("Code Mode remains intercepted across disabled-to-enabled config transition
 		);
 		assert.equal(invokeCount, 1);
 
+		writeFileSync(configPath, JSON.stringify({ commands: { rm: { allow: ["code-mode-target"] } } }));
+		await nested.invoke({ cmd: "rm code-mode-target" }, { cwd: "/tmp", extensionContext: context });
+		assert.equal(invokeCount, 2);
+		writeFileSync(configPath, JSON.stringify({ commands: { rm: { requireApproval: ["code-mode-target"] } } }));
+		await assert.rejects(
+			nested.invoke({ cmd: "rm code-mode-target" }, { cwd: "/tmp", extensionContext: context }),
+			/Custom command rule requires approval/,
+		);
+		assert.equal(invokeCount, 2);
+
 		writeFileSync(configPath, JSON.stringify({ guards: { rm: "off" } }));
 		await assert.rejects(
 			nested.invoke({ cmd: "rm invalid-config" }, { cwd: "/tmp", extensionContext: context }),
 			/rm command needs confirmation/,
 		);
-		assert.equal(invokeCount, 1);
+		assert.equal(invokeCount, 2);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

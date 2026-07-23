@@ -9,15 +9,17 @@ import {
 	isHerdrPane,
 	loadApprovalAttentionSettings,
 	loadGuardSettings,
+	loadPolicySettings,
 	nativeNotificationProcesses,
 	parseApprovalAttentionSettings,
 	parseGuardSettings,
+	parseCommandOverrides,
 	parseHerdrNotificationOutput,
 	sendTerminalNotification,
 	shouldUseNativeNotification,
 	terminalNotificationSequence,
 } from "./attention.ts";
-import { DEFAULT_GUARD_SETTINGS } from "./guarded-executables.ts";
+import { DEFAULT_COMMAND_OVERRIDES, DEFAULT_GUARD_SETTINGS } from "./guarded-executables.ts";
 import { test } from "./test-harness.ts";
 
 test("approval attention config is silent by default and resolves sound paths from the agent directory", () => {
@@ -53,6 +55,40 @@ test("approval attention config is silent by default and resolves sound paths fr
 	});
 });
 
+test("command override config validates and normalizes per-CLI rules", () => {
+	const configPath = "/home/test/.pi/agent/infra-command-guard.json";
+	assert.deepEqual(parseCommandOverrides({}, configPath), DEFAULT_COMMAND_OVERRIDES);
+	assert.deepEqual(
+		parseCommandOverrides(
+			{
+				commands: {
+					kubectl: {
+						allow: ["  delete   pod   dev-*  "],
+						requireApproval: ["logs"],
+					},
+				},
+			},
+			configPath,
+		).kubectl,
+		{ allow: ["delete pod dev-*"], requireApproval: ["logs"] },
+	);
+	assert.throws(() => parseCommandOverrides({ commands: [] }, configPath), /commands must be a JSON object/);
+	assert.throws(() => parseCommandOverrides({ commands: { azure: {} } }, configPath), /unknown field: azure/);
+	assert.throws(() => parseCommandOverrides({ commands: { aws: { deny: [] } } }, configPath), /unknown field: deny/);
+	assert.throws(() => parseCommandOverrides({ commands: { aws: { allow: "list" } } }, configPath), /array of strings/);
+	assert.throws(() => parseCommandOverrides({ commands: { aws: { allow: [""] } } }, configPath), /must not be empty/);
+	assert.throws(() => parseCommandOverrides({ commands: { aws: { allow: [12] } } }, configPath), /must be a string/);
+	assert.throws(() => parseCommandOverrides({ commands: { aws: { allow: ["** *"] } } }, configPath), /literal character/);
+	assert.deepEqual(parseCommandOverrides({ commands: { aws: { requireApproval: ["*"] } } }, configPath).aws, {
+		allow: [],
+		requireApproval: ["*"],
+	});
+	assert.throws(
+		() => parseCommandOverrides({ commands: { aws: { allow: [`list${" ".repeat(509)}`] } } }, configPath),
+		/cannot exceed 512 characters/,
+	);
+});
+
 test("guard config defaults to enabled, accepts partial overrides, and reloads from disk", () => {
 	const configPath = "/home/test/.pi/agent/infra-command-guard.json";
 	assert.deepEqual(parseGuardSettings({}, configPath), DEFAULT_GUARD_SETTINGS);
@@ -72,6 +108,8 @@ test("guard config defaults to enabled, accepts partial overrides, and reloads f
 		assert.equal(loadGuardSettings(runtimeConfigPath).settings.terraform, false);
 		writeFileSync(runtimeConfigPath, JSON.stringify({ guards: { terraform: true } }));
 		assert.equal(loadGuardSettings(runtimeConfigPath).settings.terraform, true);
+		writeFileSync(runtimeConfigPath, JSON.stringify({ commands: { terraform: { allow: ["output"] } } }));
+		assert.deepEqual(loadPolicySettings(runtimeConfigPath).settings.commands.terraform.allow, ["output"]);
 
 		writeFileSync(runtimeConfigPath, JSON.stringify({ guards: { terraform: "off" } }));
 		const invalid = loadGuardSettings(runtimeConfigPath);

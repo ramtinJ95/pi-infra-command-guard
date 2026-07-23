@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { DEFAULT_GUARD_SETTINGS, type GuardedExecutable } from "./guarded-executables.ts";
+import {
+	DEFAULT_COMMAND_OVERRIDES,
+	DEFAULT_GUARD_SETTINGS,
+	type CommandOverrides,
+	type GuardedExecutable,
+} from "./guarded-executables.ts";
 import { evaluateCommand } from "./policy.ts";
 import { test } from "./test-harness.ts";
 
@@ -379,4 +384,81 @@ test("disabled guards compose with enabled guards without hiding them", () => {
 	assert.equal(evaluateCommand("rm terraform && terraform plan", settings).allow, true);
 	assert.equal(evaluateCommand("rm terraform && terraform apply", settings).allow, false);
 	assert.equal(evaluateCommand("$TOOL delete target", settings).allow, false);
+});
+
+test("custom allow rules bypass built-in policy after global-option normalization", () => {
+	const commands: CommandOverrides = {
+		...DEFAULT_COMMAND_OVERRIDES,
+		argocd: { allow: ["app sync"], requireApproval: [] },
+		aws: { allow: ["ec2 terminate-instances"], requireApproval: [] },
+		az: { allow: ["vm delete"], requireApproval: [] },
+		gcloud: { allow: ["compute instances delete"], requireApproval: [] },
+		helm: { allow: ["uninstall"], requireApproval: [] },
+		kubectl: { allow: ["delete pod dev-*"], requireApproval: [] },
+		rm: { allow: ["-rf build"], requireApproval: [] },
+		terraform: { allow: ["output"], requireApproval: [] },
+	};
+	for (const command of [
+		"argocd --server argocd.example.com app sync api",
+		"aws --profile production ec2 terminate-instances --instance-ids i-123",
+		"az --subscription production vm delete --resource-group api --name web",
+		"gcloud --project production compute instances delete web",
+		"helm --kube-context production uninstall api",
+		"sudo /usr/local/bin/kubectl --context production delete pod dev-api --wait=false",
+		"rm -rf build",
+		"terraform -chdir=infra output database_password",
+	]) {
+		assert.equal(evaluateCommand(command, DEFAULT_GUARD_SETTINGS, commands).allow, true, command);
+	}
+	assert.equal(
+		evaluateCommand("kubectl delete pod production-api", DEFAULT_GUARD_SETTINGS, commands).allow,
+		false,
+	);
+	assert.equal(
+		evaluateCommand("terraform output && kubectl delete pod production-api", DEFAULT_GUARD_SETTINGS, commands).allow,
+		false,
+	);
+});
+
+test("custom requireApproval rules override allow rules and built-in safe policy", () => {
+	const commands: CommandOverrides = {
+		...DEFAULT_COMMAND_OVERRIDES,
+		aws: { allow: [], requireApproval: ["--version"] },
+		gcloud: { allow: ["compute instances list"], requireApproval: ["compute instances list"] },
+		kubectl: { allow: [], requireApproval: ["port-forward"] },
+	};
+	for (const command of [
+		"aws --version",
+		"gcloud --project production compute instances list",
+		"kubectl port-forward service/api 8080:80",
+	]) {
+		const decision = evaluateCommand(command, DEFAULT_GUARD_SETTINGS, commands);
+		assert.equal(decision.allow, false, command);
+		if (!decision.allow) assert.match(decision.reason, /Custom command rule requires approval/);
+	}
+});
+
+test("custom allow rules cannot bypass opaque behavior flags", () => {
+	const commands: CommandOverrides = {
+		...DEFAULT_COMMAND_OVERRIDES,
+		gcloud: { allow: ["compute instances list"], requireApproval: [] },
+		helm: { allow: ["template"], requireApproval: [] },
+		kubectl: { allow: ["get pods"], requireApproval: [] },
+	};
+	for (const command of [
+		"gcloud compute instances list --flags-file=hidden.yaml",
+		"helm template api ./chart --post-renderer ./renderer",
+		"kubectl get pods --raw=/api/v1/secrets",
+	]) {
+		assert.equal(evaluateCommand(command, DEFAULT_GUARD_SETTINGS, commands).allow, false, command);
+	}
+});
+
+test("CLI master toggles take precedence over custom command rules", () => {
+	const guards = { ...DEFAULT_GUARD_SETTINGS, terraform: false };
+	const commands: CommandOverrides = {
+		...DEFAULT_COMMAND_OVERRIDES,
+		terraform: { allow: [], requireApproval: ["apply"] },
+	};
+	assert.equal(evaluateCommand("terraform apply", guards, commands).allow, true);
 });
