@@ -1,6 +1,6 @@
 # infra-command-guard
 
-Global pi extension that wraps the built-in `bash` tool and intercepts direct and GPT-5.6 Code Mode `exec_command` calls, asking for approval before running higher-risk `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, and `rm` commands.
+Global pi extension that wraps the built-in `bash` tool and intercepts direct and GPT-5.6 Code Mode `exec_command` calls, asking for approval before higher-risk infrastructure, cloud, and destructive local-file commands.
 
 ## Install
 
@@ -99,11 +99,18 @@ Stable commands with explicit read-style actions such as `list`, `show`, `get-*`
 
 Stable commands with explicit read-style actions such as `list`, `describe`, `get-*`, `read`, `search-*`, logs, storage `cat`/`du`/`hash`, IAM policy troubleshooting, `status`, and operation waits are allowed. Authentication-token output, credential retrieval, and Secret Manager reads remain guarded. `alpha`, `beta`, `--flags-file`, mutating, and unknown commands fail closed.
 
+### Local file tools
+
+Ordinary `find` searches and `rsync` transfers without deletion flags are allowed. `rsync --dry-run` and `rsync -n` remain allowed even when showing what a deletion-enabled transfer would do. Executable-bearing rsync options remain guarded when they contain shell behavior or delegate to another guarded tool. Help/version-only invocations of `unlink`, `rmdir`, `shred`, and `truncate` are also allowed.
+
 ## What requires approval
 
 - Mutating infra commands such as `kubectl delete`, `terraform apply`, `helm upgrade`, `argocd app sync`, `aws ec2 terminate-instances`, `az vm delete`, and `gcloud compute instances delete`
 - `rm` commands
 - Wrapped or path-qualified `rm` commands such as `sudo rm`, `env rm`, and `/bin/rm`
+- `unlink`, `rmdir`, `shred`, and `truncate` mutations
+- `find -delete`
+- `rsync --delete`, its timing/exclusion variants, `--delete-missing-args`, and `--remove-source-files` unless dry-run mode is active
 - Executables resolved through shell variables, such as `$TOOL ...`
 - Assignment-based indirection such as `K=kubectl; $K ...`
 - Commands the guard cannot classify safely
@@ -155,7 +162,7 @@ Every guard is enabled by default. Add only the overrides you need:
 }
 ```
 
-Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, and `rm`. A disabled guard bypasses policy checks for direct, path-qualified, and recognized wrapper invocations such as `sudo` and `env`. Enabled guards in the same command remain enforced. Dynamic executable expressions such as `$TOOL apply` still require approval while any guard is enabled because the target cannot be identified safely. Opaque shell-runner commands also remain conservative when they mention an enabled guard name.
+Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `rm`, `unlink`, `rmdir`, `shred`, `truncate`, `find`, and `rsync`. A disabled guard bypasses policy checks for direct, path-qualified, and recognized wrapper invocations such as `sudo` and `env`. Enabled guards in the same command remain enforced. Dynamic executable expressions such as `$TOOL apply` still require approval while any guard is enabled because the target cannot be identified safely. Opaque shell-runner commands also remain conservative when they mention an enabled guard name.
 
 Changing guard settings invalidates pending requests and unused one-time approvals. Run the command again under the new configuration if approval is still required.
 
@@ -187,7 +194,7 @@ Enabled guards can customize individual commands:
 
 Rules omit the executable and match case-sensitive normalized argument prefixes. Executable paths and recognized wrappers such as `sudo` and `env` are ignored. Known non-command global CLI options are removed wherever they occur before matching, while command-specific flags, arguments, and command-like `--help`/`--version` options retain their order. `*` matches characters within one token and never crosses whitespace. For example, `delete pod dev-*` matches `sudo kubectl --context production delete pod dev-api --wait=false`, but not `kubectl delete pod production-api`. Because rules are prefixes, every trailing argument is also covered by the match; use `requireApproval` for narrower exceptions that must remain guarded.
 
-Overrides apply only after the shell invocation has been parsed safely. They do not bypass dynamic executable, opaque shell-runner, unsupported shell syntax, interactive-session, `kubectl --raw`, `gcloud --flags-file`, or Helm post-renderer restrictions. Changing command rules also invalidates pending requests and unused approvals. Invalid rules are ignored together with the rest of the invalid configuration, leaving every guard enabled under its built-in policy.
+Overrides apply only after the shell invocation has been parsed safely. They do not bypass dynamic executable, opaque shell-runner, unsupported shell syntax, interactive-session, rsync executable-option, `kubectl --raw`, `gcloud --flags-file`, or Helm post-renderer restrictions. Changing command rules also invalidates pending requests and unused approvals. Invalid rules are ignored together with the rest of the invalid configuration, leaving every guard enabled under its built-in policy.
 
 ### Approval notifications and sound
 
