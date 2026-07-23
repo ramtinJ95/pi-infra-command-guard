@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { APPROVAL_STORE_KEY } from "./approvals.ts";
 import {
 	CODE_MODE_GUARD_BRIDGE_KEY,
@@ -6,6 +9,17 @@ import {
 } from "./code-mode.ts";
 import createExtension from "./index.ts";
 import { test } from "./test-harness.ts";
+
+const ALL_GUARDS_DISABLED = {
+	argocd: false,
+	aws: false,
+	az: false,
+	gcloud: false,
+	helm: false,
+	kubectl: false,
+	rm: false,
+	terraform: false,
+};
 
 test("outer Code Mode calls fail closed when the private runtime is absent", async () => {
 	const handlers = new Map<string, Array<(event: any, context: any) => unknown>>();
@@ -187,4 +201,113 @@ test("stale approval tool closures follow the current reload store", async () =>
 		{ mode: "rpc" },
 	);
 	assert.match(result.content[0].text, /TUI approval UI is not available/);
+});
+
+test("extension reloads guard toggles from config for each command", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-extension-"));
+	const configPath = join(directory, "infra-command-guard.json");
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = directory;
+	try {
+		const handlers = new Map<string, Array<(event: any, context: any) => unknown>>();
+		const pi = {
+			events: {},
+			registerCommand() {},
+			registerTool() {},
+			on(name: string, handler: (event: any, context: any) => unknown) {
+				handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+			},
+		};
+		createExtension(pi as never);
+		const toolCall = handlers.get("tool_call")![0]!;
+		const warnings: string[] = [];
+		const context = {
+			cwd: "/tmp",
+			mode: "tui",
+			ui: { notify(message: string) { warnings.push(message); } },
+		};
+
+		writeFileSync(configPath, JSON.stringify({ guards: { rm: false } }));
+		assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: "rm disabled" } }, context), undefined);
+
+		writeFileSync(configPath, JSON.stringify({ guards: { rm: true } }));
+		const enabled = await toolCall({ toolName: "exec_command", input: { cmd: "rm enabled" } }, context) as { block: boolean; reason: string };
+		assert.equal(enabled.block, true);
+		assert.match(enabled.reason, /Approval request:/);
+		const requestId = enabled.reason.match(/Approval request: ([0-9a-f-]+)/)?.[1];
+		assert.ok(requestId);
+		const store = (pi.events as Record<PropertyKey, unknown>)[APPROVAL_STORE_KEY] as { approve: (...args: string[]) => { ok: boolean } };
+		assert.equal(store.approve(requestId, "rm enabled", "rm command needs confirmation").ok, true);
+
+		writeFileSync(configPath, JSON.stringify({ guards: ALL_GUARDS_DISABLED }));
+		assert.equal(await toolCall({ toolName: "exec", input: { code: "dynamic" } }, context), undefined);
+
+		writeFileSync(configPath, JSON.stringify({ guards: { rm: "off" } }));
+		const invalid = await toolCall({ toolName: "exec_command", input: { cmd: "rm enabled" } }, context) as { block: boolean };
+		assert.equal(invalid.block, true);
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0]!, /All command guards remain enabled/);
+		await toolCall({ toolName: "exec_command", input: { cmd: "rm invalid-config-again" } }, context);
+		assert.equal(warnings.length, 1);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test("Code Mode remains intercepted across disabled-to-enabled config transitions", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-code-mode-config-"));
+	const configPath = join(directory, "infra-command-guard.json");
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = directory;
+	try {
+		let invokeCount = 0;
+		const provider = {
+			getTools() {
+				return [{
+					name: "exec_command",
+					async invoke(_input?: unknown, _context?: unknown) { invokeCount += 1; },
+				}];
+			},
+		};
+		const events: Record<PropertyKey, unknown> = {};
+		const handlers = new Map<string, Array<(event: any, context: any) => unknown>>();
+		const pi = {
+			events,
+			registerCommand() {},
+			registerTool() {},
+			on(name: string, handler: (event: any, context: any) => unknown) {
+				handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+			},
+		};
+		createExtension(pi as never);
+		events[CODE_MODE_RUNTIME_KEY] = { runtime: { providers: new Map([[{}, provider]]) } };
+		const context = { cwd: "/tmp", mode: "tui" };
+		const toolCall = handlers.get("tool_call")![0]!;
+
+		writeFileSync(configPath, JSON.stringify({ guards: ALL_GUARDS_DISABLED }));
+		assert.equal(await toolCall({ toolName: "exec", input: { code: "dynamic" } }, context), undefined);
+		const nested = provider.getTools()[0]!;
+
+		writeFileSync(configPath, JSON.stringify({ guards: { rm: false, terraform: true } }));
+		await nested.invoke({ cmd: "rm disabled" }, { cwd: "/tmp", extensionContext: context });
+		assert.equal(invokeCount, 1);
+		await assert.rejects(
+			nested.invoke({ cmd: "rm disabled && terraform apply" }, { cwd: "/tmp", extensionContext: context }),
+			/terraform apply is not on the low-risk allowlist/,
+		);
+		assert.equal(invokeCount, 1);
+
+		writeFileSync(configPath, JSON.stringify({ guards: { rm: "off" } }));
+		await assert.rejects(
+			nested.invoke({ cmd: "rm invalid-config" }, { cwd: "/tmp", extensionContext: context }),
+			/rm command needs confirmation/,
+		);
+		assert.equal(invokeCount, 1);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(directory, { recursive: true, force: true });
+	}
 });

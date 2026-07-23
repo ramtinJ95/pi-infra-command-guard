@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { DEFAULT_GUARD_SETTINGS, type GuardedExecutable } from "./guarded-executables.ts";
 import { evaluateCommand } from "./policy.ts";
 import { test } from "./test-harness.ts";
 
@@ -336,4 +337,46 @@ test("wrapper matrix cannot hide guarded executables", () => {
 	]) {
 		assert.equal(evaluateCommand(command).allow, true, command);
 	}
+});
+
+test("individual guard toggles bypass only their configured CLI", () => {
+	const riskyCommands: Record<GuardedExecutable, string> = {
+		argocd: "argocd app sync api",
+		aws: "aws ec2 terminate-instances --instance-ids i-123",
+		az: "az vm delete --resource-group api --name web",
+		gcloud: "gcloud compute instances delete web --zone us-central1-a",
+		helm: "helm uninstall api",
+		kubectl: "kubectl delete pod api",
+		rm: "rm -rf target",
+		terraform: "terraform apply",
+	};
+
+	for (const [executable, command] of Object.entries(riskyCommands) as Array<[GuardedExecutable, string]>) {
+		const settings = { ...DEFAULT_GUARD_SETTINGS, [executable]: false };
+		assert.equal(evaluateCommand(command, settings).allow, true, executable);
+		assert.equal(evaluateCommand(`sudo ${command}`, settings).allow, true, `wrapped ${executable}`);
+		assert.equal(evaluateCommand(`${command} terraform`, settings).allow, true, `enabled guard name as argument to ${executable}`);
+		assert.equal(
+			evaluateCommand(`${command} && kubectl delete pod still-guarded`, settings).allow,
+			executable === "kubectl",
+			`mixed ${executable}`,
+		);
+	}
+});
+
+test("disabling every guard bypasses ambiguity and interactive-session restrictions", () => {
+	const disabled = Object.fromEntries(
+		Object.keys(DEFAULT_GUARD_SETTINGS).map((executable) => [executable, false]),
+	) as Record<GuardedExecutable, boolean>;
+	for (const command of ["$TOOL delete target", 'bash -lc "rm -rf target"', "kubectl delete pod api && terraform apply"]) {
+		assert.equal(evaluateCommand(command, disabled).allow, true, command);
+	}
+});
+
+test("disabled guards compose with enabled guards without hiding them", () => {
+	const settings = { ...DEFAULT_GUARD_SETTINGS, rm: false };
+	assert.equal(evaluateCommand('bash -lc "rm -rf target"', settings).allow, true);
+	assert.equal(evaluateCommand("rm terraform && terraform plan", settings).allow, true);
+	assert.equal(evaluateCommand("rm terraform && terraform apply", settings).allow, false);
+	assert.equal(evaluateCommand("$TOOL delete target", settings).allow, false);
 });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { ApprovalStore, executionIdentity, guardExecution } from "./approvals.ts";
+import { DEFAULT_GUARD_SETTINGS } from "./guarded-executables.ts";
 import { test } from "./test-harness.ts";
 
 test("approval is bound to the blocked execution context and consumed once", () => {
@@ -78,6 +79,21 @@ test("one approval cannot authorize two concurrent identical retries", () => {
 	assert.deepEqual([store.consume(identity), store.consume(identity)].sort(), [false, true]);
 });
 
+test("clearing approvals invalidates pending requests and unused grants", () => {
+	const store = new ApprovalStore(() => 1_000, () => "config-request");
+	const approvedIdentity = executionIdentity("exec-command", { cmd: "rm approved" }, "/tmp")!;
+	guardExecution(store, approvedIdentity, "tui");
+	assert.deepEqual(store.approve("config-request", approvedIdentity.command, "rm command needs confirmation"), { ok: true });
+
+	const pendingIdentity = executionIdentity("exec-command", { cmd: "rm pending" }, "/tmp")!;
+	store.createPending(pendingIdentity, "rm command needs confirmation");
+	store.clear();
+	assert.equal(store.consume(approvedIdentity), false);
+	const validation = store.validate("config-request", pendingIdentity.command, "rm command needs confirmation");
+	assert.equal(validation.ok, false);
+	if (!validation.ok) assert.match(validation.error, /missing or expired/);
+});
+
 test("approval requests expire", () => {
 	let now = 5_000;
 	const store = new ApprovalStore(() => now, () => "expiring-request");
@@ -111,4 +127,7 @@ test("interactive interpreters are denied rather than approvable", () => {
 	}
 	const nonInteractive = executionIdentity("code-mode-exec-command", { cmd: "bash -lc 'printf safe'" }, "/tmp")!;
 	assert.deepEqual(guardExecution(store, nonInteractive, "tui"), { allow: true });
+	const disabled = Object.fromEntries(Object.keys(DEFAULT_GUARD_SETTINGS).map((key) => [key, false])) as never;
+	const interactive = executionIdentity("code-mode-exec-command", { cmd: "bash", tty: true }, "/tmp")!;
+	assert.deepEqual(guardExecution(store, interactive, "tui", disabled), { allow: true });
 });

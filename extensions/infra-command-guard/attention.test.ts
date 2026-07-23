@@ -1,17 +1,23 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	autoNotificationBackend,
 	customSoundProcesses,
 	detectTerminalNotificationBackend,
 	isHerdrPane,
 	loadApprovalAttentionSettings,
+	loadGuardSettings,
 	nativeNotificationProcesses,
 	parseApprovalAttentionSettings,
+	parseGuardSettings,
 	parseHerdrNotificationOutput,
 	sendTerminalNotification,
 	shouldUseNativeNotification,
 	terminalNotificationSequence,
 } from "./attention.ts";
+import { DEFAULT_GUARD_SETTINGS } from "./guarded-executables.ts";
 import { test } from "./test-harness.ts";
 
 test("approval attention config is silent by default and resolves sound paths from the agent directory", () => {
@@ -45,6 +51,35 @@ test("approval attention config is silent by default and resolves sound paths fr
 		sound: { enabled: false, path: null },
 		integrations: { herdr: { enabled: true } },
 	});
+});
+
+test("guard config defaults to enabled, accepts partial overrides, and reloads from disk", () => {
+	const configPath = "/home/test/.pi/agent/infra-command-guard.json";
+	assert.deepEqual(parseGuardSettings({}, configPath), DEFAULT_GUARD_SETTINGS);
+	assert.deepEqual(parseGuardSettings({ guards: { az: false, rm: false } }, configPath), {
+		...DEFAULT_GUARD_SETTINGS,
+		az: false,
+		rm: false,
+	});
+	assert.throws(() => parseGuardSettings({ guards: [] }, configPath), /guards must be a JSON object/);
+	assert.throws(() => parseGuardSettings({ guards: { azure: false } }, configPath), /unknown field: azure/);
+	assert.throws(() => parseGuardSettings({ guards: { terraform: "off" } }, configPath), /must be true or false/);
+
+	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-config-"));
+	const runtimeConfigPath = join(directory, "infra-command-guard.json");
+	try {
+		writeFileSync(runtimeConfigPath, JSON.stringify({ guards: { terraform: false } }));
+		assert.equal(loadGuardSettings(runtimeConfigPath).settings.terraform, false);
+		writeFileSync(runtimeConfigPath, JSON.stringify({ guards: { terraform: true } }));
+		assert.equal(loadGuardSettings(runtimeConfigPath).settings.terraform, true);
+
+		writeFileSync(runtimeConfigPath, JSON.stringify({ guards: { terraform: "off" } }));
+		const invalid = loadGuardSettings(runtimeConfigPath);
+		assert.match(invalid.error ?? "", /guards\.terraform must be true or false/);
+		assert.deepEqual(invalid.settings, DEFAULT_GUARD_SETTINGS);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
 });
 
 test("Herdr integration requires pane markers and parses broker results", () => {
