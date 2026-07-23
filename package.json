@@ -1,7 +1,7 @@
 {
   "name": "@ramtinj95/pi-infra-command-guard",
   "version": "0.2.5",
-  "description": "Approval guard for risky infrastructure commands in Pi and GPT-5.6 Code Mode",
+  "description": "Approval guard for risky infrastructure and cloud CLI commands in Pi and GPT-5.6 Code Mode",
   "type": "module",
   "license": "MIT",
   "author": "Ramtin Javanmardi",
@@ -21,6 +21,9 @@
     "terraform",
     "helm",
     "argocd",
+    "aws",
+    "azure",
+    "gcloud",
     "approval"
   ],
   "files": [
@@ -57,6 +60,7 @@
     "typescript": "^7.0.2"
   },
   "scripts": {
+    "benchmark:policy": "bun extensions/infra-command-guard/policy.bench.ts",
     "test": "bun extensions/infra-command-guard/index.test.ts",
     "typecheck": "tsc",
     "test:package": "npm pack --dry-run",
