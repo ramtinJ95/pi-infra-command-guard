@@ -140,6 +140,116 @@ test("argocd allows explicit reads and guards application or control-plane mutat
 	}
 });
 
+test("aws allows explicit reads and guards mutations or sensitive reads", () => {
+	for (const command of [
+		"aws --profile production ec2 describe-instances",
+		"aws ec2 describe-instances --region us-east-1",
+		"aws ec2 --debug describe-instances",
+		"sudo /usr/local/bin/aws s3 ls s3://releases",
+		"aws sts get-caller-identity",
+		"aws dynamodb scan --table-name jobs",
+		"aws cloudformation validate-template --template-body file://template.yaml",
+		"aws configure list-profiles",
+		"aws --version",
+	]) {
+		assert.equal(evaluateCommand(command).allow, true, command);
+	}
+
+	for (const command of [
+		"aws ec2 terminate-instances --instance-ids i-123",
+		"aws ec2 terminate-instances --instance-ids i-123 --dry-run",
+		"aws s3 cp artifact.zip s3://releases/artifact.zip",
+		"aws cloudformation deploy --stack-name production",
+		"aws secretsmanager list-secrets",
+		"aws secretsmanager get-secret-value --secret-id database",
+		"aws ssm get-parameter --name /production/password --with-decryption",
+		"aws ssm get-parameter-history --name /production/password --with-decryption",
+		"aws ecr get-login-password",
+		"aws eks get-token --cluster-name production",
+		"aws apigateway get-api-key --api-key abc --include-value",
+		"aws lambda get-function-configuration --function-name api",
+		"aws lambda list-functions",
+		"aws ecs describe-task-definition --task-definition api",
+		"aws sts get-session-token",
+		"aws configure export-credentials",
+		"aws madeup inspect-resource",
+	]) {
+		assert.equal(evaluateCommand(command).allow, false, command);
+	}
+});
+
+test("az allows explicit reads and guards mutations or sensitive reads", () => {
+	for (const command of [
+		"az --subscription production vm list --resource-group api",
+		"az vm --subscription production list",
+		"az vm show --ids /subscriptions/example/resourceGroups/api/providers/Microsoft.Compute/virtualMachines/web",
+		"az group exists --name production",
+		"az deployment group what-if --resource-group api --template-file main.bicep",
+		"az monitor metrics list --resource vm-id",
+		"az keyvault key list --vault-name production",
+		"az lock list --resource-group production",
+		"az restore-point collection list --resource-group production --vm-name web",
+		"az search service list --resource-group production",
+		"az account show",
+		"az version",
+	]) {
+		assert.equal(evaluateCommand(command).allow, true, command);
+	}
+
+	for (const command of [
+		"az vm delete --resource-group api --name web --yes",
+		"az group create --name production --location westus",
+		"az search service delete --name index --resource-group production",
+		"az account set --subscription production",
+		"az login",
+		"az account get-access-token",
+		"az aks get-credentials --resource-group api --name production",
+		"az keyvault secret list --vault-name production",
+		"az keyvault secret show --vault-name production --name database",
+		"az storage account keys list --resource-group api --account-name data",
+		"az storage blob lease acquire list",
+		"az webapp config appsettings list --resource-group api --name web",
+		"az rest --method get --url https://management.azure.com/subscriptions",
+	]) {
+		assert.equal(evaluateCommand(command).allow, false, command);
+	}
+});
+
+test("gcloud allows explicit reads and guards mutations or sensitive reads", () => {
+	for (const command of [
+		"gcloud --project production compute instances list",
+		"gcloud compute --project production instances list",
+		"gcloud compute instances describe web --zone us-central1-a",
+		"gcloud projects get-iam-policy production",
+		"gcloud logging read 'severity>=ERROR' --limit 10",
+		"gcloud asset search-all-resources --scope organizations/123",
+		"gcloud components list",
+		"gcloud config get-value project",
+		"gcloud auth list",
+		"gcloud run services list",
+		"gcloud deploy releases list --delivery-pipeline api --region us-central1",
+		"gcloud info",
+	]) {
+		assert.equal(evaluateCommand(command).allow, true, command);
+	}
+
+	for (const command of [
+		"gcloud compute instances delete web --zone us-central1-a --quiet",
+		"gcloud run deploy api --image us-docker.pkg.dev/project/api",
+		"gcloud storage cp list gs://production-bucket/list",
+		"gcloud config set project production",
+		"gcloud auth print-access-token",
+		"gcloud container clusters get-credentials production --region us-central1",
+		"gcloud secrets versions list database",
+		"gcloud secrets versions access latest --secret database",
+		"gcloud alpha compute instances list",
+		"gcloud --flags-file flags.yaml compute instances list",
+		"gcloud compute instances inspect web",
+	]) {
+		assert.equal(evaluateCommand(command).allow, false, command);
+	}
+});
+
 test("guarded commands fail closed through shell composition and obfuscation", () => {
 	for (const command of [
 		"printf ready && kubectl delete pod api",
@@ -157,6 +267,10 @@ test("guarded commands fail closed through shell composition and obfuscation", (
 		'bash -lc "helm uninstall api"',
 		'python -c "import os; os.system(\'argocd app sync api\')"',
 		"kubectl port-forward service/api 8080:80 & helm uninstall api",
+		"kubectl port-forward service/api 8080:80 & aws ec2 terminate-instances --instance-ids i-123",
+		"aws ec2 terminate-instances --instance-ids i-123",
+		"az vm delete --resource-group api --name web",
+		"gcloud compute instances delete web --zone us-central1-a",
 		"$TOOL delete pod api",
 		'sudo "$TOOL" apply plan.out',
 		'"${KUBECTL}" delete pod api',
@@ -173,6 +287,9 @@ test("guarded commands fail closed through shell composition and obfuscation", (
 		'echo "${HOME}"',
 		'printf "%s\\n" "helm uninstall api"',
 		'printf "%s\\n" "argocd app sync api"',
+		'printf "%s\\n" "aws ec2 terminate-instances"',
+		'printf "%s\\n" "az vm delete"',
+		'printf "%s\\n" "gcloud compute instances delete"',
 	]) {
 		assert.equal(evaluateCommand(command).allow, true, command);
 	}
@@ -184,6 +301,9 @@ test("wrapper matrix cannot hide guarded executables", () => {
 		"terraform apply plan.out",
 		"helm upgrade api ./chart",
 		"argocd app sync api",
+		"aws ec2 terminate-instances --instance-ids i-123",
+		"az vm delete --resource-group api --name web",
+		"gcloud compute instances delete web --zone us-central1-a",
 		"rm -rf target",
 	];
 	const wrappers = [
@@ -210,6 +330,9 @@ test("wrapper matrix cannot hide guarded executables", () => {
 		"nice -n 5 terraform plan",
 		"time -p terraform validate",
 		"/usr/bin/env TF_IN_AUTOMATION=1 terraform state list",
+		"sudo -n aws ec2 describe-instances",
+		"env AZURE_CORE_ONLY_SHOW_ERRORS=1 az vm list",
+		"command gcloud projects list",
 	]) {
 		assert.equal(evaluateCommand(command).allow, true, command);
 	}
