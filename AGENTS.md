@@ -27,6 +27,12 @@ Use this shape:
     "gcloud": true,
     "rm": true
   },
+  "commands": {
+    "terraform": {
+      "allow": [],
+      "requireApproval": []
+    }
+  },
   "notifications": {
     "enabled": true,
     "backend": "auto"
@@ -43,7 +49,44 @@ Use this shape:
 }
 ```
 
-All guard keys default to `true`; users may specify only overrides. Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, and `rm`. Disabled guards bypass checks for that executable while enabled guards in mixed commands remain enforced. If every guard is disabled, dynamic executable and interactive-session restrictions are also bypassed because no guarded target remains. Changing guard settings invalidates pending requests and unused approvals. Invalid configuration fails safe with every guard enabled and a visible Pi warning.
+All guard keys default to `true`; users may specify only overrides. Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, and `rm`. Disabled guards bypass checks for that executable while enabled guards in mixed commands remain enforced. If every guard is disabled, dynamic executable and interactive-session restrictions are also bypassed because no guarded target remains.
+
+`commands.<cli>.allow` bypasses built-in policy for matching commands, while `requireApproval` forces approval and takes precedence. Rules are case-sensitive normalized token prefixes, omit the executable, and support `*` within a token. Paths, recognized wrappers, and known non-command global CLI options do not affect matching; command-like help/version options remain matchable. Prefix allow rules include every unmatched trailing argument, must contain at least one literal character, and cannot bypass `kubectl --raw`, `gcloud --flags-file`, or Helm post-renderer restrictions. The CLI guard toggle is the master switch: when false, command overrides for that CLI are ignored. Shell-level ambiguity restrictions remain outside command overrides. Changing guard settings or command rules invalidates pending requests and unused approvals. Invalid configuration fails safe with every guard enabled, no custom overrides, and a visible Pi warning.
+
+When translating a user request into configuration:
+
+- Read and preserve the existing file; change only the requested fields.
+- Use `guards.<cli>: false` for “never guard this CLI.” Do not emulate that with a broad allow rule.
+- Add a rule to `allow` for “let this command run without approval.” Explain that a prefix also covers trailing arguments and flags when the requested rule is broad or safety-sensitive.
+- Add a rule to `requireApproval` for “always ask before this command.” A wildcard-only rule such as `"*"` is valid here and forces approval for every non-empty command under that enabled CLI.
+- Omit the executable from rules. For example, use `"output"`, not `"terraform output"`; use `"delete pod dev-*"`, not `"kubectl delete pod dev-*"`.
+- Keep resource-specific allow rules as narrow as practical. Prefer `"delete pod dev-*"` over `"delete"` when that reflects the request.
+- If `allow` and `requireApproval` both match, tell the user that `requireApproval` wins.
+- If `guards.<cli>` is `false`, tell the user that command rules for that CLI are retained in JSON but inactive until the guard is enabled again.
+- Do not add empty sections or expand omitted defaults unless the user asks for a complete example.
+
+Common mappings:
+
+```json
+{
+  "guards": {
+    "az": false
+  },
+  "commands": {
+    "terraform": {
+      "allow": ["output"]
+    },
+    "kubectl": {
+      "requireApproval": ["logs"]
+    },
+    "aws": {
+      "requireApproval": ["*"]
+    }
+  }
+}
+```
+
+This means: never inspect Azure CLI commands, allow Terraform output without approval, always require approval for kubectl logs, and require approval for every AWS command. Unspecified lists are empty and unspecified guards remain enabled.
 
 Notification backends:
 
@@ -67,8 +110,8 @@ After editing the file, have the user run `/infra-guard-notify-test`. Terminal p
 
 - `attention.ts`: JSON configuration, native and terminal notifications, Herdr routing, and custom sound
 - `shell.ts`: shell parsing, wrapper extraction, and indirect-execution detection
-- `tool-policies.ts`: kubectl, Terraform, Helm, and Argo CD allowlists and evaluators
-- `policy.ts`: guarded-command orchestration and stable policy exports
+- `tool-policies.ts`: tool allowlists, evaluators, global-option normalization, and non-bypassable tool risks
+- `policy.ts`: guarded-command orchestration, custom command-rule matching, and stable policy exports
 - `approvals.ts`: execution identity, expiring one-time grants, and guard decisions
 - `approval-ui.ts`: structured approval overlay
 - `code-mode.ts`: private Code Mode runtime adapter and reload-safe bridge symbols

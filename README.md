@@ -161,6 +161,34 @@ Changing guard settings invalidates pending requests and unused one-time approva
 
 Existing configuration files without `guards` retain the current behavior with every guard enabled. Invalid configuration fails safe: every command guard remains enabled and Pi displays a warning.
 
+### Command overrides
+
+Enabled guards can customize individual commands:
+
+```json
+{
+  "commands": {
+    "terraform": {
+      "allow": ["output"],
+      "requireApproval": ["plan -destroy"]
+    },
+    "kubectl": {
+      "allow": ["delete pod dev-*"],
+      "requireApproval": ["logs"]
+    }
+  }
+}
+```
+
+- `allow` bypasses the built-in policy for a matching command. This can permit mutations, sensitive output, and any unmatched trailing command flags, so keep rules narrow. An allow rule must contain at least one literal character; use the CLI's master toggle instead of an all-wildcard rule.
+- `requireApproval` forces approval even when the built-in policy would allow the command.
+- `requireApproval` wins if both lists match.
+- `guards.<cli>: false` is the master switch and ignores all command overrides for that CLI.
+
+Rules omit the executable and match case-sensitive normalized argument prefixes. Executable paths and recognized wrappers such as `sudo` and `env` are ignored. Known non-command global CLI options are removed wherever they occur before matching, while command-specific flags, arguments, and command-like `--help`/`--version` options retain their order. `*` matches characters within one token and never crosses whitespace. For example, `delete pod dev-*` matches `sudo kubectl --context production delete pod dev-api --wait=false`, but not `kubectl delete pod production-api`. Because rules are prefixes, every trailing argument is also covered by the match; use `requireApproval` for narrower exceptions that must remain guarded.
+
+Overrides apply only after the shell invocation has been parsed safely. They do not bypass dynamic executable, opaque shell-runner, unsupported shell syntax, interactive-session, `kubectl --raw`, `gcloud --flags-file`, or Helm post-renderer restrictions. Changing command rules also invalidates pending requests and unused approvals. Invalid rules are ignored together with the rest of the invalid configuration, leaving every guard enabled under its built-in policy.
+
 ### Approval notifications and sound
 
 The package is silent by default and ships no audio files. Configure attention mechanisms in `~/.pi/agent/infra-command-guard.json`:
@@ -233,7 +261,7 @@ To play a user-supplied sound independently of the notification backend:
 
 `~` is expanded. Relative paths resolve from the directory containing `infra-command-guard.json`. The extension uses `afplay` on macOS, tries `paplay` then `aplay` on Linux, and supports WAV through PowerShell on Windows.
 
-Invalid JSON, unknown fields, non-boolean guard values, unsupported backend values, and enabled sound without a path produce a Pi warning. Invalid configuration keeps every command guard enabled and disables attention mechanisms for that request. Notification and sound failures never authorize or execute the blocked command.
+Invalid JSON, unknown fields, malformed command rules, non-boolean guard values, unsupported backend values, and enabled sound without a path produce a Pi warning. Invalid configuration keeps every command guard enabled under its built-in policy and disables attention mechanisms for that request. Notification and sound failures never authorize or execute the blocked command.
 
 Version 0.2.0 replaces the 0.1.x `PI_INFRA_COMMAND_GUARD_SOUND_PATH` and `PI_INFRA_COMMAND_GUARD_NATIVE_NOTIFICATION` environment variables with this JSON file.
 
