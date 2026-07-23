@@ -11,6 +11,9 @@ import { type GuardedExecutable } from "./guarded-executables.ts";
 import {
 	allow,
 	evaluateArgocd,
+	evaluateAws,
+	evaluateAz,
+	evaluateGcloud,
 	evaluateHelm,
 	evaluateKubectl,
 	evaluateTerraform,
@@ -22,6 +25,9 @@ import {
 
 const TOOL_EVALUATORS = {
 	argocd: evaluateArgocd,
+	aws: evaluateAws,
+	az: evaluateAz,
+	gcloud: evaluateGcloud,
 	helm: evaluateHelm,
 	kubectl: evaluateKubectl,
 	rm: () => requireApproval("rm command needs confirmation"),
@@ -102,6 +108,9 @@ export {
 	evaluateTerraform,
 	evaluateHelm,
 	evaluateArgocd,
+	evaluateAws,
+	evaluateAz,
+	evaluateGcloud,
 } from "./tool-policies.ts";
 export { evaluateCommand };
 export type { PolicyDecision } from "./tool-policies.ts";

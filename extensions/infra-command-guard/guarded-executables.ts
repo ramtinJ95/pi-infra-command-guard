@@ -1,4 +1,4 @@
-const GUARDED_EXECUTABLES = ["kubectl", "terraform", "helm", "argocd", "rm"] as const;
+const GUARDED_EXECUTABLES = ["kubectl", "terraform", "helm", "argocd", "az", "aws", "gcloud", "rm"] as const;
 
 type GuardedExecutable = (typeof GUARDED_EXECUTABLES)[number];
 

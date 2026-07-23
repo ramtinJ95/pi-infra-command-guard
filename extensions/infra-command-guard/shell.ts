@@ -481,11 +481,8 @@ function collectPositionals(
 		}
 
 		if (word.startsWith("-")) {
-			if (positionals.length === 0) {
-				const classification = classifyLeadingOption(word, leadingBooleanOptions, leadingValueOptions);
-				if (classification === "unknown") {
-					return { error: `Unsupported leading option: ${word}` };
-				}
+			const classification = classifyLeadingOption(word, leadingBooleanOptions, leadingValueOptions);
+			if (classification !== "unknown") {
 				if (classification === "boolean") {
 					index += 1;
 					continue;
@@ -499,6 +496,10 @@ function collectPositionals(
 				}
 				index += 2;
 				continue;
+			}
+
+			if (positionals.length === 0) {
+				return { error: `Unsupported leading option: ${word}` };
 			}
 
 			if (word.includes("=")) {
