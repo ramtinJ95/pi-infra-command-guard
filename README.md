@@ -136,13 +136,42 @@ This adapter uses `pi-codex-conversion` internals until that package exposes a s
 
 The current package is validated with Pi 0.81.1 and `@howaboua/pi-codex-conversion` 2.2.16. Normal Pi `bash` guarding does not require Code Mode. Because the Code Mode adapter intentionally fails closed around private internals, test the guard after upgrading either package.
 
-## Approval notifications and sound
+## Configuration
+
+Configure the extension in `~/.pi/agent/infra-command-guard.json`. When `PI_CODING_AGENT_DIR` overrides Pi's configuration directory, put `infra-command-guard.json` there instead. The extension reads the file for every shell command and approval request, so edits apply immediately without `/reload`.
+
+### Guard toggles
+
+Every guard is enabled by default. Add only the overrides you need:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/ramtinJ95/pi-infra-command-guard/main/infra-command-guard.schema.json",
+  "guards": {
+    "terraform": false,
+    "az": false,
+    "rm": false
+  }
+}
+```
+
+Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, and `rm`. A disabled guard bypasses policy checks for direct, path-qualified, and recognized wrapper invocations such as `sudo` and `env`. Enabled guards in the same command remain enforced. Dynamic executable expressions such as `$TOOL apply` still require approval while any guard is enabled because the target cannot be identified safely. Opaque shell-runner commands also remain conservative when they mention an enabled guard name.
+
+Changing guard settings invalidates pending requests and unused one-time approvals. Run the command again under the new configuration if approval is still required.
+
+Existing configuration files without `guards` retain the current behavior with every guard enabled. Invalid configuration fails safe: every command guard remains enabled and Pi displays a warning.
+
+### Approval notifications and sound
 
 The package is silent by default and ships no audio files. Configure attention mechanisms in `~/.pi/agent/infra-command-guard.json`:
 
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/ramtinJ95/pi-infra-command-guard/main/infra-command-guard.schema.json",
+  "guards": {
+    "terraform": false,
+    "az": false
+  },
   "notifications": {
     "enabled": true,
     "backend": "auto"
@@ -158,8 +187,6 @@ The package is silent by default and ships no audio files. Configure attention m
   }
 }
 ```
-
-When `PI_CODING_AGENT_DIR` overrides Pi's configuration directory, put `infra-command-guard.json` there instead. The extension reads the file for every approval request, so edits apply to the next popup without `/reload`.
 
 ### Notification backends
 
@@ -206,7 +233,7 @@ To play a user-supplied sound independently of the notification backend:
 
 `~` is expanded. Relative paths resolve from the directory containing `infra-command-guard.json`. The extension uses `afplay` on macOS, tries `paplay` then `aplay` on Linux, and supports WAV through PowerShell on Windows.
 
-Invalid JSON, unknown fields, unsupported backend values, and enabled sound without a path produce a Pi warning and disable attention mechanisms for that request. Notification and sound failures never authorize or execute the blocked command.
+Invalid JSON, unknown fields, non-boolean guard values, unsupported backend values, and enabled sound without a path produce a Pi warning. Invalid configuration keeps every command guard enabled and disables attention mechanisms for that request. Notification and sound failures never authorize or execute the blocked command.
 
 Version 0.2.0 replaces the 0.1.x `PI_INFRA_COMMAND_GUARD_SOUND_PATH` and `PI_INFRA_COMMAND_GUARD_NATIVE_NOTIFICATION` environment variables with this JSON file.
 

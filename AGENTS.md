@@ -4,7 +4,7 @@ This repository is the canonical source for `@ramtinj95/pi-infra-command-guard`.
 
 ## User configuration
 
-When a user asks to configure approval notifications or sound, edit:
+When a user asks to configure command guards, approval notifications, or sound, edit:
 
 ```text
 ~/.pi/agent/infra-command-guard.json
@@ -17,6 +17,16 @@ Use this shape:
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/ramtinJ95/pi-infra-command-guard/main/infra-command-guard.schema.json",
+  "guards": {
+    "kubectl": true,
+    "terraform": true,
+    "helm": true,
+    "argocd": true,
+    "aws": true,
+    "az": true,
+    "gcloud": true,
+    "rm": true
+  },
   "notifications": {
     "enabled": true,
     "backend": "auto"
@@ -33,6 +43,8 @@ Use this shape:
 }
 ```
 
+All guard keys default to `true`; users may specify only overrides. Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, and `rm`. Disabled guards bypass checks for that executable while enabled guards in mixed commands remain enforced. If every guard is disabled, dynamic executable and interactive-session restrictions are also bypassed because no guarded target remains. Changing guard settings invalidates pending requests and unused approvals. Invalid configuration fails safe with every guard enabled and a visible Pi warning.
+
 Notification backends:
 
 - `auto`: use native notifications on macOS and Windows; on Linux, use a recognized terminal notifier first and otherwise fall back to `notify-send`
@@ -43,7 +55,7 @@ Herdr panes do not pass raw terminal notification sequences to the outer termina
 
 Sound is independent of notification delivery. Set `sound.enabled` to `true` and `sound.path` to a user-owned audio file. `~` is expanded, and relative paths resolve from the directory containing the JSON file. The package ships no sound files.
 
-Configuration is read for every approval request, so changes apply to the next popup without `/reload`. Invalid JSON, unknown fields, unsupported values, and enabled sound without a path produce a visible Pi warning and disable attention mechanisms for that request; they never change command approval behavior.
+Configuration is read for every shell command and approval request, so changes apply without `/reload`. Invalid JSON, unknown fields, unsupported values, and enabled sound without a path produce a visible Pi warning, keep every command guard enabled, and disable attention mechanisms for that request.
 
 After editing the file, have the user run `/infra-guard-notify-test`. Terminal protocols cannot confirm that the OS displayed an accepted notification; if Kitty, Ghostty, or the OS suppresses it, configure `native` instead.
 
