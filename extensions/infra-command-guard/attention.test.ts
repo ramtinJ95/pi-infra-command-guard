@@ -92,10 +92,12 @@ test("command override config validates and normalizes per-CLI rules", () => {
 test("guard config defaults to enabled, accepts partial overrides, and reloads from disk", () => {
 	const configPath = "/home/test/.pi/agent/infra-command-guard.json";
 	assert.deepEqual(parseGuardSettings({}, configPath), DEFAULT_GUARD_SETTINGS);
-	assert.deepEqual(parseGuardSettings({ guards: { az: false, rm: false } }, configPath), {
+	assert.deepEqual(parseGuardSettings({ guards: { az: false, find: false, rm: false, unlink: false } }, configPath), {
 		...DEFAULT_GUARD_SETTINGS,
 		az: false,
+		find: false,
 		rm: false,
+		unlink: false,
 	});
 	assert.throws(() => parseGuardSettings({ guards: [] }, configPath), /guards must be a JSON object/);
 	assert.throws(() => parseGuardSettings({ guards: { azure: false } }, configPath), /unknown field: azure/);

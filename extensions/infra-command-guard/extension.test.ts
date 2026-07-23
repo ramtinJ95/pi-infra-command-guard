@@ -14,11 +14,17 @@ const ALL_GUARDS_DISABLED = {
 	argocd: false,
 	aws: false,
 	az: false,
+	find: false,
 	gcloud: false,
 	helm: false,
 	kubectl: false,
 	rm: false,
+	rmdir: false,
+	rsync: false,
+	shred: false,
 	terraform: false,
+	truncate: false,
+	unlink: false,
 };
 
 test("outer Code Mode calls fail closed when the private runtime is absent", async () => {

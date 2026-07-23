@@ -41,6 +41,13 @@ test("shell parser and policy never throw for deterministic arbitrary input", ()
 	}
 });
 
+test("find placeholders remain literal without enabling shell grouping syntax", () => {
+	assert.deepEqual(parseSimpleCommands("find . -exec echo {} \\;"), {
+		segments: [{ words: ["find", ".", "-exec", "echo", "{}", ";"], bare: "find . -exec echo {} ;" }],
+	});
+	assert.match((parseSimpleCommands("{ echo grouped; }") as { error: string }).error, /grouping token/);
+});
+
 test("semantics-preserving shell variations cannot hide guarded mutations", () => {
 	const mutations = [
 		{ executable: "kubectl", args: "delete pod api" },

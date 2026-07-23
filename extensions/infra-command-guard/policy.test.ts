@@ -25,6 +25,77 @@ test("rm classification covers executable paths and common wrappers", () => {
 	assert.equal(evaluateCommand("kubectl port-forward service/api 8080:80 && rm marker").allow, false);
 });
 
+test("destructive local file commands require approval without blocking ordinary find and rsync", () => {
+	for (const command of [
+		"unlink target",
+		"sudo /usr/bin/unlink target",
+		"rmdir empty-directory",
+		"shred secrets.txt",
+		"truncate -s 0 database.sqlite",
+		"find . -type f -delete",
+		"busybox find . -delete",
+		"toybox find . -delete",
+		"toybox --long unlink target",
+		"find . -exec rm -rf {} \\;",
+		"find . -execdir unlink {} \\;",
+		"find /bin -name rm -exec {} -rf target \\;",
+		`find /bin -name rm -exec sh -c '{} -rf target' \\;`,
+		"rsync -a --delete source/ destination/",
+		"rsync -a --delete-b source/ destination/",
+		"rsync --delete-before source/ destination/",
+		"rsync --delete-during source/ destination/",
+		"rsync --delete-delay source/ destination/",
+		"rsync --delete-after source/ destination/",
+		"rsync --delete-excluded source/ destination/",
+		"rsync --delete-missing-args source/ destination/",
+		"rsync --remove-source-files source/ destination/",
+		`rsync --rsync-path='rm -rf target; rsync' source/ host:destination/`,
+	]) {
+		assert.equal(evaluateCommand(command).allow, false, command);
+	}
+
+	for (const command of [
+		"find . -type f -name '*.tmp' -print",
+		"find . -type f -exec python process.py {} \\;",
+		"busybox find . -type f -print",
+		"toybox find . -type f -print",
+		"toybox --long find . -type f -print",
+		"rsync -a source/ destination/",
+		"rsync -e ssh source/ host:destination/",
+		"rsync --rsh='ssh -p 2222' source/ host:destination/",
+		"rsync --rsync-path=/usr/local/bin/rsync source/ host:destination/",
+		"rsync --delete --no-delete source/ destination/",
+		"rsync --delete-excluded --no-delete-excluded source/ destination/",
+		"rsync --remove-source-files --no-remove-source-files source/ destination/",
+		"rsync --dry-run --delete source/ destination/",
+		"rsync -an --delete source/ destination/",
+		"unlink --help",
+		"rmdir --version",
+		"shred --help",
+		"truncate --version",
+		"rg find README.md",
+		"printf '%s\\n' unlink truncate rsync",
+	]) {
+		assert.equal(evaluateCommand(command).allow, true, command);
+	}
+
+	// Values consumed by rsync options are not active dry-run flags.
+	assert.equal(evaluateCommand("rsync -e --dry-run --delete source/ destination/").allow, false);
+	assert.equal(evaluateCommand("rsync --filter --dry-run --delete source/ destination/").allow, false);
+	assert.equal(evaluateCommand("rsync --bw --dry-run --delete source/ destination/").allow, false);
+	assert.equal(evaluateCommand("rsync --dry-run --no-dry-run --delete source/ destination/").allow, false);
+	assert.equal(evaluateCommand("rsync -n --no-dry --delete source/ destination/").allow, false);
+	assert.equal(evaluateCommand("rsync --no-dry-run --dry-run --delete source/ destination/").allow, true);
+	assert.equal(evaluateCommand("rsync --delete --delete-excluded --no-delete-excluded source/ destination/").allow, false);
+	assert.equal(evaluateCommand(`rsync -e "sh -c 'rm -rf target'" source/ host:destination/`).allow, false);
+	assert.equal(evaluateCommand(`rsync --rs="sh -c 'rm -rf target'" source/ host:destination/`).allow, false);
+	const findDisabled = { ...DEFAULT_GUARD_SETTINGS, find: false };
+	assert.equal(evaluateCommand("find . -exec unlink {} \\;", findDisabled).allow, false);
+	assert.equal(evaluateCommand("find /bin -name rm -exec {} -rf target \\;", findDisabled).allow, false);
+	const rsyncDisabled = { ...DEFAULT_GUARD_SETTINGS, rsync: false };
+	assert.equal(evaluateCommand(`rsync -e "sh -c 'rm -rf target'" source/ host:destination/`, rsyncDisabled).allow, false);
+});
+
 test("kubectl and terraform retain their safe and approval-required behavior", () => {
 	for (const command of [
 		"kubectl get pods",
@@ -310,7 +381,13 @@ test("wrapper matrix cannot hide guarded executables", () => {
 		"aws ec2 terminate-instances --instance-ids i-123",
 		"az vm delete --resource-group api --name web",
 		"gcloud compute instances delete web --zone us-central1-a",
+		"find . -delete",
 		"rm -rf target",
+		"rmdir target",
+		"rsync --delete source/ destination/",
+		"shred target",
+		"truncate -s 0 target",
+		"unlink target",
 	];
 	const wrappers = [
 		(command: string) => command,
@@ -339,6 +416,8 @@ test("wrapper matrix cannot hide guarded executables", () => {
 		"sudo -n aws ec2 describe-instances",
 		"env AZURE_CORE_ONLY_SHOW_ERRORS=1 az vm list",
 		"command gcloud projects list",
+		"nice -n 5 find . -type f -print",
+		"time -p rsync --dry-run --delete source/ destination/",
 	]) {
 		assert.equal(evaluateCommand(command).allow, true, command);
 	}
@@ -349,11 +428,17 @@ test("individual guard toggles bypass only their configured CLI", () => {
 		argocd: "argocd app sync api",
 		aws: "aws ec2 terminate-instances --instance-ids i-123",
 		az: "az vm delete --resource-group api --name web",
+		find: "find . -delete",
 		gcloud: "gcloud compute instances delete web --zone us-central1-a",
 		helm: "helm uninstall api",
 		kubectl: "kubectl delete pod api",
 		rm: "rm -rf target",
+		rmdir: "rmdir target",
+		rsync: "rsync --delete source/ destination/",
+		shred: "shred target",
 		terraform: "terraform apply",
+		truncate: "truncate -s 0 target",
+		unlink: "unlink target",
 	};
 
 	for (const [executable, command] of Object.entries(riskyCommands) as Array<[GuardedExecutable, string]>) {
@@ -392,21 +477,33 @@ test("custom allow rules bypass built-in policy after global-option normalizatio
 		argocd: { allow: ["app sync"], requireApproval: [] },
 		aws: { allow: ["ec2 terminate-instances"], requireApproval: [] },
 		az: { allow: ["vm delete"], requireApproval: [] },
+		find: { allow: [". -delete"], requireApproval: [] },
 		gcloud: { allow: ["compute instances delete"], requireApproval: [] },
 		helm: { allow: ["uninstall"], requireApproval: [] },
 		kubectl: { allow: ["delete pod dev-*"], requireApproval: [] },
 		rm: { allow: ["-rf build"], requireApproval: [] },
+		rmdir: { allow: ["build"], requireApproval: [] },
+		rsync: { allow: ["--delete source/ destination/"], requireApproval: [] },
+		shred: { allow: ["build.log"], requireApproval: [] },
 		terraform: { allow: ["output"], requireApproval: [] },
+		truncate: { allow: ["-s 0 build.log"], requireApproval: [] },
+		unlink: { allow: ["build.log"], requireApproval: [] },
 	};
 	for (const command of [
 		"argocd --server argocd.example.com app sync api",
 		"aws --profile production ec2 terminate-instances --instance-ids i-123",
 		"az --subscription production vm delete --resource-group api --name web",
+		"find . -delete",
 		"gcloud --project production compute instances delete web",
 		"helm --kube-context production uninstall api",
 		"sudo /usr/local/bin/kubectl --context production delete pod dev-api --wait=false",
 		"rm -rf build",
+		"rmdir build",
+		"rsync --delete source/ destination/",
+		"shred build.log",
 		"terraform -chdir=infra output database_password",
+		"truncate -s 0 build.log",
+		"unlink build.log",
 	]) {
 		assert.equal(evaluateCommand(command, DEFAULT_GUARD_SETTINGS, commands).allow, true, command);
 	}
@@ -444,11 +541,14 @@ test("custom allow rules cannot bypass opaque behavior flags", () => {
 		gcloud: { allow: ["compute instances list"], requireApproval: [] },
 		helm: { allow: ["template"], requireApproval: [] },
 		kubectl: { allow: ["get pods"], requireApproval: [] },
+		rsync: { allow: ["-e *", "--rsync-path=*"], requireApproval: [] },
 	};
 	for (const command of [
 		"gcloud compute instances list --flags-file=hidden.yaml",
 		"helm template api ./chart --post-renderer ./renderer",
 		"kubectl get pods --raw=/api/v1/secrets",
+		`rsync -e "sh -c 'rm -rf target'" source/ host:destination/`,
+		`rsync --rsync-path='rm -rf target; rsync' source/ host:destination/`,
 	]) {
 		assert.equal(evaluateCommand(command, DEFAULT_GUARD_SETTINGS, commands).allow, false, command);
 	}
