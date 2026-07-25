@@ -26,6 +26,7 @@ Use this shape:
     "az": true,
     "gcloud": true,
     "docker": true,
+    "git": true,
     "find": true,
     "rm": true,
     "rmdir": true,
@@ -56,13 +57,15 @@ Use this shape:
 }
 ```
 
-All guard keys default to `true`; users may specify only overrides. Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `find`, `rm`, `rmdir`, `rsync`, `shred`, `truncate`, and `unlink`. Disabled guards bypass checks for that executable while enabled guards in mixed commands remain enforced. If every guard is disabled, dynamic executable and interactive-session restrictions are also bypassed because no guarded target remains.
+All guard keys default to `true`; users may specify only overrides. Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `git`, `find`, `rm`, `rmdir`, `rsync`, `shred`, `truncate`, and `unlink`. Disabled guards bypass checks for that executable while enabled guards in mixed commands remain enforced. If every guard is disabled, dynamic executable and interactive-session restrictions are also bypassed because no guarded target remains.
 
 The Docker policy is targeted rather than fail-closed: it guards resource removal/pruning, destructive Compose flags, arbitrary container execution, privileged or host-control options, Docker control-plane and registry changes, and mutations aimed at an explicit CLI host/context. Ordinary diagnostics and development workflows remain allowed, as do unknown `docker` subcommands without a recognized risk. It classifies `docker compose`; the standalone `docker-compose` executable is conservatively approval-required as indirect Docker invocation. It cannot infer endpoints from inherited environment/current-context state or inspect Dockerfiles and Compose files.
 
+The Git policy is also targeted. It guards destructive clean/reset/restore/checkout forms, forced branch and tag deletion, stash/reflog destruction, forced worktree removal, immediate object pruning, and destructive pushes. Ordinary Git commands and unknown subcommands remain allowed. Invocation-local aliases are non-bypassable because they hide behavior; inherited aliases, hooks, helpers, and repository-dependent checkout ambiguity remain outside lexical classification.
+
 The local-file policies require approval for `rm`, mutations through `unlink`, `rmdir`, `shred`, and `truncate`, `find -delete`, and rsync deletion/removal flags. Ordinary `find` searches and `rsync` transfers remain allowed, as do rsync dry runs. Rsync options that can supply executable commands remain non-bypassable when they contain shell behavior or another guarded tool. Keep these as individual guard keys so users can disable or customize one tool without weakening the others.
 
-`commands.<cli>.allow` bypasses built-in policy for matching commands, while `requireApproval` forces approval and takes precedence. Rules are case-sensitive normalized token prefixes, omit the executable, and support `*` within a token. Paths, recognized wrappers, and known non-command global CLI options do not affect matching; command-like help/version options remain matchable. Prefix allow rules include every unmatched trailing argument, must contain at least one literal character, and cannot bypass `kubectl --raw`, `gcloud --flags-file`, or Helm post-renderer restrictions. The CLI guard toggle is the master switch: when false, command overrides for that CLI are ignored. Shell-level ambiguity restrictions remain outside command overrides. Changing guard settings or command rules invalidates pending requests and unused approvals. Invalid configuration fails safe with every guard enabled, no custom overrides, and a visible Pi warning.
+`commands.<cli>.allow` bypasses built-in policy for matching commands, while `requireApproval` forces approval and takes precedence. Rules are case-sensitive normalized token prefixes, omit the executable, and support `*` within a token. Paths, recognized wrappers, and known non-command global CLI options do not affect matching; command-like help/version options remain matchable. Prefix allow rules include every unmatched trailing argument, must contain at least one literal character, and cannot bypass `kubectl --raw`, `gcloud --flags-file`, Helm post-renderer, or invocation-local Git alias restrictions. The CLI guard toggle is the master switch: when false, command overrides for that CLI are ignored. Shell-level ambiguity restrictions remain outside command overrides. Changing guard settings or command rules invalidates pending requests and unused approvals. Invalid configuration fails safe with every guard enabled, no custom overrides, and a visible Pi warning.
 
 When translating a user request into configuration:
 

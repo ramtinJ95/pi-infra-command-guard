@@ -107,6 +107,14 @@ Approval is required for resource removal and pruning; `docker compose rm`; Comp
 
 The policy classifies the current `docker compose` subcommand. The deprecated standalone `docker-compose` executable has no command-level classifier and is conservatively approval-required as indirect Docker invocation. Unknown `docker` subcommands are allowed unless they contain a recognized risk. The guard cannot see a Docker endpoint selected through inherited environment variables or the current saved context, and it does not inspect Dockerfiles or Compose files for privileged behavior.
 
+### Git
+
+Git also uses a targeted destructive-operation policy. Ordinary status, diff, history, staging, commits, rebase/merge, normal branch switching, `git rm`, staged-only restore, recoverable reset modes, and normal pushes remain allowed.
+
+Approval is required for `git clean` except dry-run; `reset --hard`; working-tree restore and unambiguous checkout path replacement; forced/discarding checkout or switch; forced branch deletion and tag deletion; stash drop/clear; reflog deletion/expiration; forced dirty-worktree removal; immediate object pruning; and force, force-with-lease, mirror, deletion, or destructive-refspec pushes. Valid dry-run forms remain allowed. Invocation-local aliases supplied through `-c alias.*` or `--config-env=alias.*` remain guarded even when a custom `allow` rule matches because they can hide arbitrary behavior.
+
+Unknown Git subcommands are allowed. The guard does not read repository or user configuration, so inherited aliases, hooks, remote helpers, external `git-*` commands, and checkout forms whose branch/path meaning depends on repository state remain outside command-level classification.
+
 ### Local file tools
 
 Ordinary `find` searches and `rsync` transfers without deletion flags are allowed. `rsync --dry-run` and `rsync -n` remain allowed even when showing what a deletion-enabled transfer would do. Executable-bearing rsync options remain guarded when they contain shell behavior or delegate to another guarded tool. Help/version-only invocations of `unlink`, `rmdir`, `shred`, and `truncate` are also allowed.
@@ -115,6 +123,7 @@ Ordinary `find` searches and `rsync` transfers without deletion flags are allowe
 
 - Mutating infra commands such as `kubectl delete`, `terraform apply`, `helm upgrade`, `argocd app sync`, `aws ec2 terminate-instances`, `az vm delete`, and `gcloud compute instances delete`
 - Higher-risk Docker commands such as `docker volume rm`, `docker system prune`, `docker exec`, `docker run --privileged`, and `docker --context production compose up`
+- Destructive Git commands such as `git clean -fdx`, `git reset --hard`, `git stash clear`, and `git push --force`
 - `rm` commands
 - Wrapped or path-qualified `rm` commands such as `sudo rm`, `env rm`, and `/bin/rm`
 - `unlink`, `rmdir`, `shred`, and `truncate` mutations
@@ -171,7 +180,7 @@ Every guard is enabled by default. Add only the overrides you need:
 }
 ```
 
-Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `rm`, `unlink`, `rmdir`, `shred`, `truncate`, `find`, and `rsync`. A disabled guard bypasses policy checks for direct, path-qualified, and recognized wrapper invocations such as `sudo` and `env`. Enabled guards in the same command remain enforced. Dynamic executable expressions such as `$TOOL apply` still require approval while any guard is enabled because the target cannot be identified safely. Opaque shell-runner commands also remain conservative when they mention an enabled guard name.
+Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `git`, `rm`, `unlink`, `rmdir`, `shred`, `truncate`, `find`, and `rsync`. A disabled guard bypasses policy checks for direct, path-qualified, and recognized wrapper invocations such as `sudo` and `env`. Enabled guards in the same command remain enforced. Dynamic executable expressions such as `$TOOL apply` still require approval while any guard is enabled because the target cannot be identified safely. Opaque shell-runner commands also remain conservative when they mention an enabled guard name.
 
 Changing guard settings invalidates pending requests and unused one-time approvals. Run the command again under the new configuration if approval is still required.
 
@@ -203,7 +212,7 @@ Enabled guards can customize individual commands:
 
 Rules omit the executable and match case-sensitive normalized argument prefixes. Executable paths and recognized wrappers such as `sudo` and `env` are ignored. Known non-command global CLI options are removed wherever they occur before matching, while command-specific flags, arguments, and command-like `--help`/`--version` options retain their order. `*` matches characters within one token and never crosses whitespace. For example, `delete pod dev-*` matches `sudo kubectl --context production delete pod dev-api --wait=false`, but not `kubectl delete pod production-api`. Because rules are prefixes, every trailing argument is also covered by the match; use `requireApproval` for narrower exceptions that must remain guarded.
 
-Overrides apply only after the shell invocation has been parsed safely. They do not bypass dynamic executable, opaque shell-runner, unsupported shell syntax, interactive-session, rsync executable-option, `kubectl --raw`, `gcloud --flags-file`, or Helm post-renderer restrictions. Changing command rules also invalidates pending requests and unused approvals. Invalid rules are ignored together with the rest of the invalid configuration, leaving every guard enabled under its built-in policy.
+Overrides apply only after the shell invocation has been parsed safely. They do not bypass dynamic executable, opaque shell-runner, unsupported shell syntax, interactive-session, rsync executable-option, `kubectl --raw`, `gcloud --flags-file`, Helm post-renderer, or invocation-local Git alias restrictions. Changing command rules also invalidates pending requests and unused approvals. Invalid rules are ignored together with the rest of the invalid configuration, leaving every guard enabled under its built-in policy.
 
 ### Approval notifications and sound
 
@@ -288,6 +297,7 @@ Version 0.2.0 replaces the 0.1.x `PI_INFRA_COMMAND_GUARD_SOUND_PATH` and `PI_INF
 - Code Mode TOML custom tools execute their configured programs directly and are trusted capabilities outside this `exec_command` guard.
 - This is an in-process policy guard, not an OS sandbox. It cannot know that an inherited alias, shell function, opaque script, or custom executable eventually invokes guarded tooling when the command contains no guarded name or dynamic executable position. Kubernetes RBAC, scoped Terraform credentials, and filesystem permissions remain the hard security boundary.
 - Docker daemon access remains a hard security boundary. The targeted Docker policy cannot infer the active daemon from inherited `DOCKER_HOST`/`DOCKER_CONTEXT` state or detect privileged behavior encoded inside Dockerfiles and Compose files.
+- Git remote permissions, protected branches, and backups remain hard boundaries. The targeted Git policy cannot resolve inherited aliases, hooks, helpers, or repository-dependent branch/path ambiguity.
 - Interactive approval uses a custom scrollable overlay instead of pi's default confirm popup.
   - `↑` / `↓` scroll
   - `PgUp` / `PgDn` or `Ctrl+u` / `Ctrl+d` page
