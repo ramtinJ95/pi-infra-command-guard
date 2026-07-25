@@ -22,6 +22,7 @@ import {
 	evaluateArgocd,
 	evaluateAws,
 	evaluateAz,
+	evaluateDocker,
 	evaluateFind,
 	evaluateGcloud,
 	evaluateHelm,
@@ -42,6 +43,7 @@ const TOOL_EVALUATORS = {
 	argocd: evaluateArgocd,
 	aws: evaluateAws,
 	az: evaluateAz,
+	docker: evaluateDocker,
 	find: evaluateFind,
 	gcloud: evaluateGcloud,
 	helm: evaluateHelm,
@@ -59,7 +61,7 @@ const TOOL_EVALUATORS = {
 // conservative bare-text fallback for the original infrastructure tools, while
 // still detecting every guarded executable in command position and shell runners.
 const INDIRECT_TEXT_GUARDS = new Set<GuardedExecutable>([
-	"argocd", "aws", "az", "gcloud", "helm", "kubectl", "rm", "terraform",
+	"argocd", "aws", "az", "docker", "gcloud", "helm", "kubectl", "rm", "terraform",
 ]);
 const DEFAULT_ENABLED_INDIRECT_TEXT_GUARDS = GUARDED_EXECUTABLES.filter((executable) =>
 	INDIRECT_TEXT_GUARDS.has(executable)
@@ -280,6 +282,7 @@ export {
 	evaluateArgocd,
 	evaluateAws,
 	evaluateAz,
+	evaluateDocker,
 	evaluateGcloud,
 	evaluateFind,
 	evaluateRsync,

@@ -5,6 +5,14 @@ type AllowDecision = { allow: true; reason?: undefined };
 type ApprovalDecision = { allow: false; reason: string };
 type PolicyDecision = AllowDecision | ApprovalDecision;
 type ToolEvaluator = (invocation: Invocation) => PolicyDecision;
+type ToolGlobalOptions = Readonly<{
+	boolean: ReadonlySet<string>;
+	value: ReadonlySet<string>;
+	attachedValue?: ReadonlySet<string>;
+}>;
+type ParsedLeadingCommand =
+	| { command: string | null; tail: string[]; leading: string[]; error?: undefined }
+	| { command?: undefined; tail?: undefined; leading?: undefined; error: string };
 
 const OTHER_GUARDED_EXECUTABLE_PATTERN = new RegExp(
 	`\\b(?:${GUARDED_EXECUTABLES.filter((executable) => executable !== "kubectl").join("|")})\\b`,
@@ -414,10 +422,63 @@ const ARGOCD_LEADING_VALUE_OPTIONS = new Set([
 	"--server-name",
 ]);
 
+const DOCKER_LEADING_BOOLEAN_OPTIONS = new Set([
+	"-D",
+	"--debug",
+	"--help",
+	"--tls",
+	"--tlsverify",
+	"-v",
+	"--version",
+]);
+const DOCKER_LEADING_VALUE_OPTIONS = new Set([
+	"-c",
+	"--config",
+	"--context",
+	"-H",
+	"--host",
+	"-l",
+	"--log-level",
+	"--tlscacert",
+	"--tlscert",
+	"--tlskey",
+]);
+const DOCKER_ATTACHED_VALUE_OPTIONS = new Set(["-c", "-H", "-l"]);
+const DOCKER_GLOBAL_OPTIONS: ToolGlobalOptions = {
+	boolean: DOCKER_LEADING_BOOLEAN_OPTIONS,
+	value: DOCKER_LEADING_VALUE_OPTIONS,
+	attachedValue: DOCKER_ATTACHED_VALUE_OPTIONS,
+};
+
+const COMPOSE_LEADING_BOOLEAN_OPTIONS = new Set([
+	"--all-resources",
+	"--compatibility",
+	"--dry-run",
+	"--help",
+]);
+const COMPOSE_LEADING_VALUE_OPTIONS = new Set([
+	"--ansi",
+	"--env-file",
+	"-f",
+	"--file",
+	"--parallel",
+	"--profile",
+	"--progress",
+	"--project-directory",
+	"-p",
+	"--project-name",
+]);
+const COMPOSE_GLOBAL_OPTIONS: ToolGlobalOptions = {
+	boolean: COMPOSE_LEADING_BOOLEAN_OPTIONS,
+	value: COMPOSE_LEADING_VALUE_OPTIONS,
+	attachedValue: new Set(["-f", "-p"]),
+};
+
 const TOOL_GLOBAL_OPTIONS = {
 	argocd: { boolean: ARGOCD_LEADING_BOOLEAN_OPTIONS, value: ARGOCD_LEADING_VALUE_OPTIONS },
 	aws: { boolean: AWS_LEADING_BOOLEAN_OPTIONS, value: AWS_LEADING_VALUE_OPTIONS },
 	az: { boolean: AZ_LEADING_BOOLEAN_OPTIONS, value: AZ_LEADING_VALUE_OPTIONS },
+	docker: DOCKER_GLOBAL_OPTIONS,
 	find: { boolean: new Set<string>(), value: new Set<string>() },
 	gcloud: { boolean: GCLOUD_LEADING_BOOLEAN_OPTIONS, value: GCLOUD_LEADING_VALUE_OPTIONS },
 	helm: { boolean: HELM_LEADING_BOOLEAN_OPTIONS, value: HELM_LEADING_VALUE_OPTIONS },
@@ -429,7 +490,7 @@ const TOOL_GLOBAL_OPTIONS = {
 	terraform: { boolean: TERRAFORM_LEADING_BOOLEAN_OPTIONS, value: TERRAFORM_LEADING_VALUE_OPTIONS },
 	truncate: { boolean: new Set<string>(), value: new Set<string>() },
 	unlink: { boolean: new Set<string>(), value: new Set<string>() },
-} satisfies Record<GuardedExecutable, { boolean: ReadonlySet<string>; value: ReadonlySet<string> }>;
+} satisfies Record<GuardedExecutable, ToolGlobalOptions>;
 const COMMAND_LIKE_GLOBAL_OPTIONS = new Set(["-h", "--help", "-version", "--version"]);
 
 function normalizeOverrideArguments(executable: GuardedExecutable, args: string[]): string[] {
@@ -439,11 +500,14 @@ function normalizeOverrideArguments(executable: GuardedExecutable, args: string[
 		const word = args[index];
 		const name = optionName(word);
 		if (options.boolean.has(name)) {
-			if (COMMAND_LIKE_GLOBAL_OPTIONS.has(name)) normalized.push(word);
+			if (COMMAND_LIKE_GLOBAL_OPTIONS.has(name) || (executable === "docker" && name === "-v")) normalized.push(word);
 			continue;
 		}
 		if (options.value.has(name)) {
 			if (!word.includes("=")) index += 1;
+			continue;
+		}
+		if (hasAttachedOptionValue(word, options)) {
 			continue;
 		}
 		normalized.push(word);
@@ -501,6 +565,51 @@ function allow(): AllowDecision {
 function optionName(word: string): string {
 	const equalsIndex = word.indexOf("=");
 	return equalsIndex === -1 ? word : word.slice(0, equalsIndex);
+}
+
+function attachedOptionPrefix(word: string, options: ToolGlobalOptions): string | undefined {
+	return [...(options.attachedValue ?? [])].find((prefix) => word.startsWith(prefix) && word.length > prefix.length);
+}
+
+function hasAttachedOptionValue(word: string, options: ToolGlobalOptions): boolean {
+	return attachedOptionPrefix(word, options) !== undefined;
+}
+
+function parseLeadingCommand(args: readonly string[], options: ToolGlobalOptions): ParsedLeadingCommand {
+	const leading: string[] = [];
+	let index = 0;
+	while (index < args.length) {
+		const word = args[index];
+		if (word === "--") {
+			index += 1;
+			break;
+		}
+		if (!word.startsWith("-") || word === "-") break;
+		const name = optionName(word);
+		if (options.boolean.has(name)) {
+			leading.push(word);
+			index += 1;
+			continue;
+		}
+		if (options.value.has(name)) {
+			leading.push(word);
+			if (word.includes("=")) {
+				index += 1;
+				continue;
+			}
+			if (index + 1 >= args.length) return { error: `Missing value for option: ${word}` };
+			index += 2;
+			continue;
+		}
+		if (hasAttachedOptionValue(word, options)) {
+			leading.push(word);
+			index += 1;
+			continue;
+		}
+		return { error: `Unsupported leading option: ${word}` };
+	}
+	if (index >= args.length) return { command: null, tail: [], leading };
+	return { command: args[index], tail: args.slice(index + 1), leading };
 }
 
 const HELP_OR_VERSION_ARGUMENTS = new Set(["--help", "--version"]);
@@ -673,8 +782,218 @@ function findCloudAction(
 	return undefined;
 }
 
-function hasOption(args: string[], name: string): boolean {
+function hasOption(args: readonly string[], name: string): boolean {
 	return args.some((arg) => optionName(arg) === name);
+}
+
+const DOCKER_RESOURCE_REMOVAL_ACTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
+	container: new Set(["prune", "remove", "rm"]),
+	image: new Set(["prune", "remove", "rm"]),
+	network: new Set(["prune", "remove", "rm"]),
+	volume: new Set(["prune", "remove", "rm"]),
+	system: new Set(["prune"]),
+	builder: new Set(["prune", "remove", "rm"]),
+	buildx: new Set(["prune", "remove", "rm"]),
+};
+const DOCKER_CONTROL_PLANE_READS: Readonly<Record<string, ReadonlySet<string>>> = {
+	config: new Set(["inspect", "ls"]),
+	context: new Set(["inspect", "ls", "show"]),
+	node: new Set(["inspect", "ls", "ps"]),
+	plugin: new Set(["inspect", "ls"]),
+	secret: new Set(["inspect", "ls"]),
+	service: new Set(["inspect", "logs", "ls", "ps"]),
+	stack: new Set(["ls", "ps", "services"]),
+};
+const DOCKER_READ_TOP_LEVEL = new Set([
+	"diff", "events", "history", "images", "info", "inspect", "logs", "port", "ps", "search", "stats", "top", "version",
+]);
+const DOCKER_RESOURCE_READS: Readonly<Record<string, ReadonlySet<string>>> = {
+	builder: new Set(["inspect", "ls"]),
+	buildx: new Set(["du", "history", "inspect", "ls", "version"]),
+	container: new Set(["diff", "inspect", "logs", "ls", "port", "stats", "top"]),
+	image: new Set(["history", "inspect", "ls"]),
+	network: new Set(["inspect", "ls"]),
+	system: new Set(["df", "events", "info"]),
+	volume: new Set(["inspect", "ls"]),
+};
+const SAFE_COMPOSE_READS = new Set(["config", "events", "images", "logs", "ls", "port", "ps", "top", "version", "wait"]);
+const DOCKER_HOST_NAMESPACE_OPTIONS = new Set(["--cgroupns", "--ipc", "--net", "--network", "--pid", "--userns"]);
+const DOCKER_HIGH_CAPABILITIES = new Set(["ALL", "DAC_READ_SEARCH", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE"]);
+const DOCKER_CAPABILITY_OPTIONS = new Set(["--cap-add"]);
+const DOCKER_SECURITY_OPTIONS = new Set(["--security-opt"]);
+const DOCKER_VOLUME_OPTIONS = new Set(["-v", "--volume"]);
+const DOCKER_ATTACHED_VOLUME_OPTIONS = new Set(["-v"]);
+const DOCKER_MOUNT_OPTIONS = new Set(["--mount"]);
+const DOCKER_BUILD_ENTITLEMENT_OPTIONS = new Set(["--allow"]);
+const EMPTY_OPTIONS = new Set<string>();
+
+function nestedDockerAction(tail: readonly string[]): string {
+	return (tail[0] || "").toLowerCase();
+}
+
+function dockerOptionValues(args: readonly string[], names: ReadonlySet<string>, attached: ReadonlySet<string> = EMPTY_OPTIONS): string[] {
+	const values: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const word = args[index];
+		if (word === "--") break;
+		const name = optionName(word);
+		if (names.has(name)) {
+			const value = word.includes("=") ? word.slice(word.indexOf("=") + 1) : args[index += 1];
+			if (value !== undefined) values.push(value);
+			continue;
+		}
+		const prefix = [...attached].find((candidate) => word.startsWith(candidate) && word.length > candidate.length);
+		if (prefix) values.push(word.slice(prefix.length).replace(/^=/, ""));
+	}
+	return values;
+}
+
+function hasEnabledBooleanOption(args: readonly string[], name: string): boolean {
+	return args.some((word) => {
+		if (word === name) return true;
+		if (!word.startsWith(`${name}=`)) return false;
+		return !/^(?:0|false|no)$/i.test(word.slice(name.length + 1));
+	});
+}
+
+function isDockerHostRootVolume(value: string): boolean {
+	return /^(?:\/|[A-Za-z]:[\\/]):/.test(value);
+}
+
+function isDockerHostRootMount(value: string): boolean {
+	return /(?:source|src)=(?:\/|[A-Za-z]:[\\/])(?:,|$)/i.test(value);
+}
+
+function dockerUsesExplicitEndpoint(leading: readonly string[]): boolean {
+	return leading.some((word) => {
+		const name = optionName(word);
+		return name === "--context" || name === "--host" || word === "-c" || word === "-H" ||
+			(word.startsWith("-c") && word.length > 2) || (word.startsWith("-H") && word.length > 2);
+	});
+}
+
+function dockerHostControlRisk(args: readonly string[]): string | undefined {
+	if (hasEnabledBooleanOption(args, "--privileged")) return "--privileged can grant host-level control";
+	if (hasOption(args, "--device") || hasOption(args, "--device-cgroup-rule")) {
+		return "device access can expose host hardware to a container";
+	}
+
+	for (const value of dockerOptionValues(args, DOCKER_HOST_NAMESPACE_OPTIONS)) {
+		if (value.toLowerCase() === "host") return "host namespace sharing weakens container isolation";
+	}
+	for (const value of dockerOptionValues(args, DOCKER_CAPABILITY_OPTIONS)) {
+		if (DOCKER_HIGH_CAPABILITIES.has(value.toUpperCase())) return `--cap-add=${value} grants a high-impact kernel capability`;
+	}
+	for (const value of dockerOptionValues(args, DOCKER_SECURITY_OPTIONS)) {
+		if (/(?:apparmor|label|seccomp).*(?:disable|unconfined)|no-new-privileges=false/i.test(value)) {
+			return `--security-opt=${value} disables a container isolation control`;
+		}
+	}
+	for (const value of dockerOptionValues(args, DOCKER_VOLUME_OPTIONS, DOCKER_ATTACHED_VOLUME_OPTIONS)) {
+		if (isDockerHostRootVolume(value)) {
+			return "a host-root bind mount can modify the host filesystem";
+		}
+		if (/(?:docker\.sock|docker_engine)/i.test(value)) return "a Docker daemon socket mount grants control of the daemon";
+	}
+	for (const value of dockerOptionValues(args, DOCKER_MOUNT_OPTIONS)) {
+		if (isDockerHostRootMount(value)) return "a host-root bind mount can modify the host filesystem";
+		if (/(?:docker\.sock|docker_engine)/i.test(value)) return "a Docker daemon socket mount grants control of the daemon";
+	}
+	for (const value of dockerOptionValues(args, DOCKER_BUILD_ENTITLEMENT_OPTIONS)) {
+		if (/^(?:network\.host|security\.insecure)$/i.test(value)) return `--allow=${value} enables a privileged build entitlement`;
+	}
+	return undefined;
+}
+
+function isReadOnlyDockerCommand(topLevel: string, nested: string, composeAction: string | undefined, composeDryRun: boolean): boolean {
+	if (topLevel === "compose") return composeDryRun || (composeAction !== undefined && SAFE_COMPOSE_READS.has(composeAction));
+	if (DOCKER_READ_TOP_LEVEL.has(topLevel)) return true;
+	if (DOCKER_RESOURCE_READS[topLevel]?.has(nested)) return true;
+	if (DOCKER_CONTROL_PLANE_READS[topLevel]?.has(nested)) return true;
+	return false;
+}
+
+function dockerComposeApprovalReason(args: readonly string[]): { reason?: string; action?: string; dryRun?: boolean } {
+	const parsed = parseLeadingCommand(args, COMPOSE_GLOBAL_OPTIONS);
+	if ("error" in parsed) return { reason: `docker compose uses an unsupported flag layout (${parsed.error})` };
+	const action = (parsed.command || "").toLowerCase();
+	const dryRun = parsed.leading.some((word) => optionName(word) === "--dry-run");
+	if (!action || action === "help" || parsed.leading.some((word) => optionName(word) === "--help")) return { action, dryRun };
+	if (action === "exec" || action === "run") {
+		return { action, dryRun, reason: `docker compose ${action} runs an arbitrary command in a container` };
+	}
+	const hostRisk = dockerHostControlRisk(parsed.tail);
+	if (hostRisk) return { action, dryRun, reason: `docker compose ${action} ${hostRisk}` };
+	if (action === "rm") {
+		return { action, dryRun, reason: dryRun ? undefined : "docker compose rm removes service containers" };
+	}
+	if (
+		action === "down" &&
+		(
+			hasOption(parsed.tail, "-v") ||
+			hasEnabledBooleanOption(parsed.tail, "--volumes") ||
+			hasOption(parsed.tail, "--rmi") ||
+			hasEnabledBooleanOption(parsed.tail, "--remove-orphans")
+		)
+	) {
+		return { action, dryRun, reason: dryRun ? undefined : "docker compose down can remove volumes, images, or orphaned containers" };
+	}
+	if (action === "push" || action === "publish") return { action, dryRun, reason: `docker compose ${action} writes to a registry` };
+	if (hasOption(parsed.tail, "--push")) return { action, dryRun, reason: `docker compose ${action} --push writes build output to a registry` };
+	return { action, dryRun };
+}
+
+function dockerApprovalReason(args: readonly string[]): string | undefined {
+	const parsed = parseLeadingCommand(args, DOCKER_GLOBAL_OPTIONS);
+	if ("error" in parsed) return `docker uses an unsupported flag layout (${parsed.error})`;
+	const topLevel = (parsed.command || "").toLowerCase();
+	if (!topLevel || topLevel === "help" || parsed.leading.some((word) => optionName(word) === "--help")) return undefined;
+	const nested = nestedDockerAction(parsed.tail);
+	let composeAction: string | undefined;
+	let composeDryRun = false;
+	if (topLevel === "compose") {
+		const compose = dockerComposeApprovalReason(parsed.tail);
+		if (compose.reason) return compose.reason;
+		composeAction = compose.action;
+		composeDryRun = compose.dryRun === true;
+	}
+
+	if (topLevel === "rm" || topLevel === "rmi") return `docker ${topLevel} removes container data`;
+	if (DOCKER_RESOURCE_REMOVAL_ACTIONS[topLevel]?.has(nested)) {
+		return `docker ${topLevel} ${nested} removes Docker resources or data`;
+	}
+	if (topLevel === "exec" || topLevel === "debug" || (topLevel === "container" && nested === "exec")) {
+		return `docker ${topLevel === "container" ? "container exec" : topLevel} runs an arbitrary command in a container`;
+	}
+
+	const hostRisk = dockerHostControlRisk(parsed.tail);
+	if (hostRisk) return `docker ${topLevel} ${hostRisk}`;
+
+	if (topLevel === "swarm") return `docker swarm ${nested || "<unknown>"} changes or exposes swarm control-plane state`;
+	if (DOCKER_CONTROL_PLANE_READS[topLevel] && nested && nested !== "help" && !DOCKER_CONTROL_PLANE_READS[topLevel].has(nested)) {
+		return `docker ${topLevel} ${nested} changes Docker control-plane state`;
+	}
+	if (topLevel === "login" || topLevel === "logout") return `docker ${topLevel} changes stored registry credentials`;
+	if (topLevel === "push" || (topLevel === "image" && nested === "push") || (topLevel === "manifest" && nested === "push")) {
+		return `docker ${topLevel}${nested ? ` ${nested}` : ""} writes to a registry`;
+	}
+	if (topLevel === "buildx" && nested === "imagetools" && parsed.tail[1]?.toLowerCase() === "create") {
+		return "docker buildx imagetools create writes image metadata to a registry";
+	}
+	if (
+		(topLevel === "build" || topLevel === "builder" || topLevel === "buildx") &&
+		hasOption(parsed.tail, "--push")
+	) return `docker ${topLevel} --push writes build output to a registry`;
+
+	if (dockerUsesExplicitEndpoint(parsed.leading) && !isReadOnlyDockerCommand(topLevel, nested, composeAction, composeDryRun)) {
+		return `docker ${topLevel}${composeAction ? ` ${composeAction}` : ""} mutates an explicitly selected daemon`;
+	}
+	return undefined;
+}
+
+function evaluateDocker(invocation: Invocation): PolicyDecision {
+	const reason = dockerApprovalReason(invocation.args);
+	return reason ? requireApproval(reason) : allow();
 }
 
 function isSensitiveAwsRead(service: string, operation: string): boolean {
@@ -978,6 +1297,7 @@ export {
 	evaluateArgocd,
 	evaluateAws,
 	evaluateAz,
+	evaluateDocker,
 	evaluateFind,
 	evaluateGcloud,
 	evaluateRsync,

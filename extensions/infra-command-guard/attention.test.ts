@@ -83,6 +83,10 @@ test("command override config validates and normalizes per-CLI rules", () => {
 		allow: [],
 		requireApproval: ["*"],
 	});
+	assert.deepEqual(parseCommandOverrides({ commands: { docker: { allow: ["volume rm dev-*"] } } }, configPath).docker, {
+		allow: ["volume rm dev-*"],
+		requireApproval: [],
+	});
 	assert.throws(
 		() => parseCommandOverrides({ commands: { aws: { allow: [`list${" ".repeat(509)}`] } } }, configPath),
 		/cannot exceed 512 characters/,
@@ -92,9 +96,10 @@ test("command override config validates and normalizes per-CLI rules", () => {
 test("guard config defaults to enabled, accepts partial overrides, and reloads from disk", () => {
 	const configPath = "/home/test/.pi/agent/infra-command-guard.json";
 	assert.deepEqual(parseGuardSettings({}, configPath), DEFAULT_GUARD_SETTINGS);
-	assert.deepEqual(parseGuardSettings({ guards: { az: false, find: false, rm: false, unlink: false } }, configPath), {
+	assert.deepEqual(parseGuardSettings({ guards: { az: false, docker: false, find: false, rm: false, unlink: false } }, configPath), {
 		...DEFAULT_GUARD_SETTINGS,
 		az: false,
+		docker: false,
 		find: false,
 		rm: false,
 		unlink: false,

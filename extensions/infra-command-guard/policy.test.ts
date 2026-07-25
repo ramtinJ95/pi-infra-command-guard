@@ -347,7 +347,8 @@ test("guarded commands fail closed through shell composition and obfuscation", (
 		"kubectl port-forward service/api 8080:80 & aws ec2 terminate-instances --instance-ids i-123",
 		"aws ec2 terminate-instances --instance-ids i-123",
 		"az vm delete --resource-group api --name web",
-		"gcloud compute instances delete web --zone us-central1-a",
+			"gcloud compute instances delete web --zone us-central1-a",
+			"docker volume rm database",
 		"$TOOL delete pod api",
 		'sudo "$TOOL" apply plan.out',
 		'"${KUBECTL}" delete pod api',
@@ -366,7 +367,8 @@ test("guarded commands fail closed through shell composition and obfuscation", (
 		'printf "%s\\n" "argocd app sync api"',
 		'printf "%s\\n" "aws ec2 terminate-instances"',
 		'printf "%s\\n" "az vm delete"',
-		'printf "%s\\n" "gcloud compute instances delete"',
+			'printf "%s\\n" "gcloud compute instances delete"',
+			'printf "%s\\n" "docker volume rm database"',
 	]) {
 		assert.equal(evaluateCommand(command).allow, true, command);
 	}
@@ -380,7 +382,8 @@ test("wrapper matrix cannot hide guarded executables", () => {
 		"argocd app sync api",
 		"aws ec2 terminate-instances --instance-ids i-123",
 		"az vm delete --resource-group api --name web",
-		"gcloud compute instances delete web --zone us-central1-a",
+			"gcloud compute instances delete web --zone us-central1-a",
+			"docker volume rm database",
 		"find . -delete",
 		"rm -rf target",
 		"rmdir target",
@@ -416,6 +419,7 @@ test("wrapper matrix cannot hide guarded executables", () => {
 		"sudo -n aws ec2 describe-instances",
 		"env AZURE_CORE_ONLY_SHOW_ERRORS=1 az vm list",
 		"command gcloud projects list",
+		"command docker ps",
 		"nice -n 5 find . -type f -print",
 		"time -p rsync --dry-run --delete source/ destination/",
 	]) {
@@ -427,7 +431,8 @@ test("individual guard toggles bypass only their configured CLI", () => {
 	const riskyCommands: Record<GuardedExecutable, string> = {
 		argocd: "argocd app sync api",
 		aws: "aws ec2 terminate-instances --instance-ids i-123",
-		az: "az vm delete --resource-group api --name web",
+			az: "az vm delete --resource-group api --name web",
+			docker: "docker volume rm database",
 		find: "find . -delete",
 		gcloud: "gcloud compute instances delete web --zone us-central1-a",
 		helm: "helm uninstall api",
@@ -476,7 +481,8 @@ test("custom allow rules bypass built-in policy after global-option normalizatio
 		...DEFAULT_COMMAND_OVERRIDES,
 		argocd: { allow: ["app sync"], requireApproval: [] },
 		aws: { allow: ["ec2 terminate-instances"], requireApproval: [] },
-		az: { allow: ["vm delete"], requireApproval: [] },
+			az: { allow: ["vm delete"], requireApproval: [] },
+			docker: { allow: ["volume rm dev-*"], requireApproval: [] },
 		find: { allow: [". -delete"], requireApproval: [] },
 		gcloud: { allow: ["compute instances delete"], requireApproval: [] },
 		helm: { allow: ["uninstall"], requireApproval: [] },
@@ -492,7 +498,9 @@ test("custom allow rules bypass built-in policy after global-option normalizatio
 	for (const command of [
 		"argocd --server argocd.example.com app sync api",
 		"aws --profile production ec2 terminate-instances --instance-ids i-123",
-		"az --subscription production vm delete --resource-group api --name web",
+			"az --subscription production vm delete --resource-group api --name web",
+			"docker --context production volume rm dev-database",
+			"docker -Hssh://production.example volume rm dev-database",
 		"find . -delete",
 		"gcloud --project production compute instances delete web",
 		"helm --kube-context production uninstall api",
@@ -520,12 +528,14 @@ test("custom allow rules bypass built-in policy after global-option normalizatio
 test("custom requireApproval rules override allow rules and built-in safe policy", () => {
 	const commands: CommandOverrides = {
 		...DEFAULT_COMMAND_OVERRIDES,
-		aws: { allow: [], requireApproval: ["--version"] },
+			aws: { allow: [], requireApproval: ["--version"] },
+			docker: { allow: [], requireApproval: ["-v"] },
 		gcloud: { allow: ["compute instances list"], requireApproval: ["compute instances list"] },
 		kubectl: { allow: [], requireApproval: ["port-forward"] },
 	};
 	for (const command of [
-		"aws --version",
+			"aws --version",
+			"docker -v",
 		"gcloud --project production compute instances list",
 		"kubectl port-forward service/api 8080:80",
 	]) {

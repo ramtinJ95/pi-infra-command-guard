@@ -14,6 +14,7 @@ const ALL_GUARDS_DISABLED = {
 	argocd: false,
 	aws: false,
 	az: false,
+	docker: false,
 	find: false,
 	gcloud: false,
 	helm: false,

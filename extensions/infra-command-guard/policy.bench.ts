@@ -5,11 +5,13 @@ const ITERATIONS = 200_000;
 const ROUNDS = 9;
 
 const workloads = {
-	"unguarded fast path": ["git status", "npm test", "rg TODO src"],
+	"unguarded fast path": ["npm test", "rg TODO src", "node --version"],
 	"existing guarded reads": ["kubectl get pods", "terraform plan", "helm list", "argocd app get api"],
 	"existing guarded writes": ["kubectl delete pod api", "terraform apply", "helm upgrade api ./chart", "rm -rf target"],
 	"cloud CLI reads": ["aws ec2 describe-instances", "az vm list", "gcloud compute instances list"],
 	"cloud CLI writes": ["aws ec2 terminate-instances", "az vm delete", "gcloud compute instances delete web"],
+	"Docker allowed commands": ["docker ps", "docker compose up -d", "docker run nginx:latest"],
+	"Docker approval commands": ["docker volume rm database", "docker exec api sh", "docker run --privileged nginx:latest"],
 };
 
 function median(values: number[]): number {
