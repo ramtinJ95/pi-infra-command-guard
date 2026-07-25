@@ -474,12 +474,53 @@ const COMPOSE_GLOBAL_OPTIONS: ToolGlobalOptions = {
 	attachedValue: new Set(["-f", "-p"]),
 };
 
+const GIT_LEADING_BOOLEAN_OPTIONS = new Set([
+	"--bare",
+	"--exec-path",
+	"--glob-pathspecs",
+	"-h",
+	"--help",
+	"--html-path",
+	"--icase-pathspecs",
+	"--info-path",
+	"--list-cmds",
+	"--literal-pathspecs",
+	"--man-path",
+	"--no-advice",
+	"--no-lazy-fetch",
+	"--no-optional-locks",
+	"--no-pager",
+	"--no-replace-objects",
+	"--noglob-pathspecs",
+	"-P",
+	"-p",
+	"--paginate",
+	"--version",
+]);
+const GIT_LEADING_VALUE_OPTIONS = new Set([
+	"--attr-source",
+	"-C",
+	"-c",
+	"--config-env",
+	"--git-dir",
+	"--namespace",
+	"--path-format",
+	"--super-prefix",
+	"--work-tree",
+]);
+const GIT_GLOBAL_OPTIONS: ToolGlobalOptions = {
+	boolean: GIT_LEADING_BOOLEAN_OPTIONS,
+	value: GIT_LEADING_VALUE_OPTIONS,
+	attachedValue: new Set(["-C", "-c"]),
+};
+
 const TOOL_GLOBAL_OPTIONS = {
 	argocd: { boolean: ARGOCD_LEADING_BOOLEAN_OPTIONS, value: ARGOCD_LEADING_VALUE_OPTIONS },
 	aws: { boolean: AWS_LEADING_BOOLEAN_OPTIONS, value: AWS_LEADING_VALUE_OPTIONS },
 	az: { boolean: AZ_LEADING_BOOLEAN_OPTIONS, value: AZ_LEADING_VALUE_OPTIONS },
 	docker: DOCKER_GLOBAL_OPTIONS,
 	find: { boolean: new Set<string>(), value: new Set<string>() },
+	git: GIT_GLOBAL_OPTIONS,
 	gcloud: { boolean: GCLOUD_LEADING_BOOLEAN_OPTIONS, value: GCLOUD_LEADING_VALUE_OPTIONS },
 	helm: { boolean: HELM_LEADING_BOOLEAN_OPTIONS, value: HELM_LEADING_VALUE_OPTIONS },
 	kubectl: { boolean: KUBECTL_LEADING_BOOLEAN_OPTIONS, value: KUBECTL_LEADING_VALUE_OPTIONS },
@@ -527,6 +568,9 @@ function evaluateNonBypassableRisk(executable: GuardedExecutable, invocation: In
 		invocation.args.some((arg) => arg === "--post-renderer" || arg.startsWith("--post-renderer="))
 	) {
 		return requireApproval("helm --post-renderer can execute an external program");
+	}
+	if (executable === "git" && gitInlineAliasRisk(invocation.args)) {
+		return requireApproval("git invocation-local aliases can hide behavior from command policy");
 	}
 	if (executable === "rsync") return evaluateRsyncExecutableOptionRisk(invocation);
 	return undefined;
@@ -831,7 +875,7 @@ function nestedDockerAction(tail: readonly string[]): string {
 	return (tail[0] || "").toLowerCase();
 }
 
-function dockerOptionValues(args: readonly string[], names: ReadonlySet<string>, attached: ReadonlySet<string> = EMPTY_OPTIONS): string[] {
+function optionValues(args: readonly string[], names: ReadonlySet<string>, attached: ReadonlySet<string> = EMPTY_OPTIONS): string[] {
 	const values: string[] = [];
 	for (let index = 0; index < args.length; index += 1) {
 		const word = args[index];
@@ -878,28 +922,28 @@ function dockerHostControlRisk(args: readonly string[]): string | undefined {
 		return "device access can expose host hardware to a container";
 	}
 
-	for (const value of dockerOptionValues(args, DOCKER_HOST_NAMESPACE_OPTIONS)) {
+	for (const value of optionValues(args, DOCKER_HOST_NAMESPACE_OPTIONS)) {
 		if (value.toLowerCase() === "host") return "host namespace sharing weakens container isolation";
 	}
-	for (const value of dockerOptionValues(args, DOCKER_CAPABILITY_OPTIONS)) {
+	for (const value of optionValues(args, DOCKER_CAPABILITY_OPTIONS)) {
 		if (DOCKER_HIGH_CAPABILITIES.has(value.toUpperCase())) return `--cap-add=${value} grants a high-impact kernel capability`;
 	}
-	for (const value of dockerOptionValues(args, DOCKER_SECURITY_OPTIONS)) {
+	for (const value of optionValues(args, DOCKER_SECURITY_OPTIONS)) {
 		if (/(?:apparmor|label|seccomp).*(?:disable|unconfined)|no-new-privileges=false/i.test(value)) {
 			return `--security-opt=${value} disables a container isolation control`;
 		}
 	}
-	for (const value of dockerOptionValues(args, DOCKER_VOLUME_OPTIONS, DOCKER_ATTACHED_VOLUME_OPTIONS)) {
+	for (const value of optionValues(args, DOCKER_VOLUME_OPTIONS, DOCKER_ATTACHED_VOLUME_OPTIONS)) {
 		if (isDockerHostRootVolume(value)) {
 			return "a host-root bind mount can modify the host filesystem";
 		}
 		if (/(?:docker\.sock|docker_engine)/i.test(value)) return "a Docker daemon socket mount grants control of the daemon";
 	}
-	for (const value of dockerOptionValues(args, DOCKER_MOUNT_OPTIONS)) {
+	for (const value of optionValues(args, DOCKER_MOUNT_OPTIONS)) {
 		if (isDockerHostRootMount(value)) return "a host-root bind mount can modify the host filesystem";
 		if (/(?:docker\.sock|docker_engine)/i.test(value)) return "a Docker daemon socket mount grants control of the daemon";
 	}
-	for (const value of dockerOptionValues(args, DOCKER_BUILD_ENTITLEMENT_OPTIONS)) {
+	for (const value of optionValues(args, DOCKER_BUILD_ENTITLEMENT_OPTIONS)) {
 		if (/^(?:network\.host|security\.insecure)$/i.test(value)) return `--allow=${value} enables a privileged build entitlement`;
 	}
 	return undefined;
@@ -993,6 +1037,231 @@ function dockerApprovalReason(args: readonly string[]): string | undefined {
 
 function evaluateDocker(invocation: Invocation): PolicyDecision {
 	const reason = dockerApprovalReason(invocation.args);
+	return reason ? requireApproval(reason) : allow();
+}
+
+const GIT_PUSH_VALUE_OPTIONS = new Set([
+	"--exec",
+	"--push-option",
+	"--receive-pack",
+	"--repo",
+	"--server-option",
+]);
+
+function gitInlineAliasRisk(args: readonly string[]): boolean {
+	for (let index = 0; index < args.length; index += 1) {
+		const word = args[index];
+		if (word === "--" || (!word.startsWith("-") && word !== "-")) break;
+		if (word === "-c" || word === "--config-env") {
+			const configValue = args[index += 1];
+			if (configValue && /^alias\./i.test(configValue)) return true;
+			continue;
+		}
+		if (word.startsWith("-c") && word.length > 2) {
+			if (/^alias\./i.test(word.slice(2).replace(/^=/, ""))) return true;
+			continue;
+		}
+		if (word.startsWith("--config-env=")) {
+			if (/^alias\./i.test(word.slice("--config-env=".length))) return true;
+			continue;
+		}
+		const name = optionName(word);
+		if (GIT_LEADING_VALUE_OPTIONS.has(name) && !word.includes("=")) index += 1;
+	}
+	return false;
+}
+
+function hasGitShortFlag(args: readonly string[], flag: string, clusterCharacters: string): boolean {
+	for (const word of args) {
+		if (word === "--") break;
+		if (word === `-${flag}`) return true;
+		if (!/^-[^-]+$/.test(word)) continue;
+		const cluster = word.slice(1);
+		if ([...cluster].every((character) => clusterCharacters.includes(character)) && cluster.includes(flag)) return true;
+	}
+	return false;
+}
+
+function firstGitPositional(args: readonly string[]): string {
+	const delimiter = args.indexOf("--");
+	const candidates = delimiter === -1 ? args : args.slice(0, delimiter);
+	return (candidates.find((word) => !word.startsWith("-") || word === "-") || "").toLowerCase();
+}
+
+function hasGitHelpOption(args: readonly string[]): boolean {
+	for (const word of args) {
+		if (word === "--") return false;
+		if (word === "-h" || word === "--help") return true;
+	}
+	return false;
+}
+
+function gitCleanDryRun(args: readonly string[]): boolean {
+	let dryRun = false;
+	for (let index = 0; index < args.length; index += 1) {
+		const word = args[index];
+		if (word === "--") break;
+		if (word === "-e" || word === "--exclude") {
+			index += 1;
+			continue;
+		}
+		if (word.startsWith("--exclude=")) continue;
+		if (word === "--no-dry-run" || /^(?:--dry-run)=(?:0|false|no)$/i.test(word)) {
+			dryRun = false;
+			continue;
+		}
+		if (word === "--dry-run" || /^--dry-run=(?:1|true|yes)$/i.test(word)) {
+			dryRun = true;
+			continue;
+		}
+		if (/^-[^-]+$/.test(word)) {
+			const cluster = word.slice(1);
+			const excludeIndex = cluster.indexOf("e");
+			const flags = excludeIndex === -1 ? cluster : cluster.slice(0, excludeIndex);
+			if ([...flags].every((character) => "ndfiqxX".includes(character)) && flags.includes("n")) dryRun = true;
+			if (excludeIndex !== -1 && excludeIndex === cluster.length - 1) index += 1;
+		}
+	}
+	return dryRun;
+}
+
+function gitPruneDryRun(args: readonly string[]): boolean {
+	let dryRun = false;
+	for (let index = 0; index < args.length; index += 1) {
+		const word = args[index];
+		if (word === "--") break;
+		if (word === "--expire") {
+			index += 1;
+			continue;
+		}
+		if (word.startsWith("--expire=")) continue;
+		if (word === "--no-dry-run" || /^(?:--dry-run)=(?:0|false|no)$/i.test(word)) {
+			dryRun = false;
+			continue;
+		}
+		if (word === "--dry-run" || /^--dry-run=(?:1|true|yes)$/i.test(word)) {
+			dryRun = true;
+			continue;
+		}
+		if (hasGitShortFlag([word], "n", "nqv")) dryRun = true;
+	}
+	return dryRun;
+}
+
+function gitPushApprovalReason(args: readonly string[]): string | undefined {
+	let dryRun = false;
+	let repositoryOption = false;
+	let flagRisk: string | undefined;
+	const positionals: string[] = [];
+	for (let index = 0; index < args.length; index += 1) {
+		const word = args[index];
+		if (word === "--") {
+			positionals.push(...args.slice(index + 1));
+			break;
+		}
+		if (word === "-o") {
+			index += 1;
+			continue;
+		}
+		if (word.startsWith("-o") && word.length > 2 && !word.startsWith("--")) continue;
+		if (word.startsWith("--")) {
+			const name = optionName(word);
+			if (name === "--dry-run") dryRun = !/=(?:0|false|no)$/i.test(word);
+			if (name === "--no-dry-run") dryRun = false;
+			if (name === "--repo") repositoryOption = true;
+			if (name === "--force") flagRisk = "--force";
+			if (name === "--force-with-lease") flagRisk = "--force-with-lease";
+			if (name === "--force-if-includes") flagRisk = "--force-if-includes";
+			if (name === "--mirror") flagRisk = "--mirror";
+			if (name === "--delete") flagRisk = "--delete";
+			if (GIT_PUSH_VALUE_OPTIONS.has(name) && !word.includes("=")) index += 1;
+			continue;
+		}
+		if (/^-[^-]+$/.test(word)) {
+			const cluster = word.slice(1);
+			if ([...cluster].every((character) => "dfnquv".includes(character))) {
+				if (cluster.includes("n")) dryRun = true;
+				if (cluster.includes("f")) flagRisk = "-f";
+				if (cluster.includes("d")) flagRisk = "-d";
+			}
+			continue;
+		}
+		positionals.push(word);
+	}
+	if (dryRun) return undefined;
+	if (flagRisk) return `git push ${flagRisk} can rewrite or delete remote refs`;
+	const refspecs = repositoryOption ? positionals : positionals.slice(1);
+	const destructiveRefspec = refspecs.find((refspec) => refspec.startsWith("+") || /^:[^:]/.test(refspec));
+	return destructiveRefspec ? `git push refspec ${destructiveRefspec} can rewrite or delete remote refs` : undefined;
+}
+
+function gitApprovalReason(args: readonly string[]): string | undefined {
+	if (gitInlineAliasRisk(args)) return "git invocation-local aliases can hide behavior from command policy";
+	const parsed = parseLeadingCommand(args, GIT_GLOBAL_OPTIONS);
+	if ("error" in parsed) return `git uses an unsupported global flag layout (${parsed.error})`;
+	const command = (parsed.command || "").toLowerCase();
+	if (!command || command === "help" || hasGitHelpOption(parsed.tail)) return undefined;
+
+	if (command === "clean") {
+		if (gitCleanDryRun(parsed.tail)) return undefined;
+		return "git clean can permanently delete untracked files";
+	}
+	if (command === "reset" && hasOption(parsed.tail, "--hard")) {
+		return "git reset --hard can discard working-tree and index changes";
+	}
+	if (command === "restore") {
+		const staged = hasEnabledBooleanOption(parsed.tail, "--staged") || hasGitShortFlag(parsed.tail, "S", "SWqp");
+		const worktree = hasEnabledBooleanOption(parsed.tail, "--worktree") || hasGitShortFlag(parsed.tail, "W", "SWqp");
+		if (!staged || worktree) return "git restore writes tracked content into the working tree";
+	}
+	if (command === "checkout") {
+		if (hasEnabledBooleanOption(parsed.tail, "--force") || hasGitShortFlag(parsed.tail, "f", "qf")) {
+			return "git checkout --force can discard working-tree changes";
+		}
+		const delimiter = parsed.tail.indexOf("--");
+		if (delimiter !== -1 && delimiter + 1 < parsed.tail.length) {
+			return "git checkout path mode overwrites working-tree files";
+		}
+	}
+	if (
+		command === "switch" &&
+		(hasEnabledBooleanOption(parsed.tail, "--force") || hasEnabledBooleanOption(parsed.tail, "--discard-changes") || hasGitShortFlag(parsed.tail, "f", "qf"))
+	) return "git switch discard/force mode can discard working-tree changes";
+	if (command === "branch") {
+		const forcedDelete = hasGitShortFlag(parsed.tail, "D", "dDf") ||
+			((hasEnabledBooleanOption(parsed.tail, "--delete") || hasGitShortFlag(parsed.tail, "d", "dDf")) &&
+				(hasEnabledBooleanOption(parsed.tail, "--force") || hasGitShortFlag(parsed.tail, "f", "dDf")));
+		if (forcedDelete) return "git branch force-delete can discard an unmerged branch ref";
+	}
+	if (command === "tag" && (hasEnabledBooleanOption(parsed.tail, "--delete") || hasGitShortFlag(parsed.tail, "d", "dnsv"))) {
+		return "git tag deletion removes a local tag ref";
+	}
+	if (command === "stash") {
+		const action = firstGitPositional(parsed.tail);
+		if (action === "drop" || action === "clear") return `git stash ${action} removes saved work`;
+	}
+	if (command === "reflog") {
+		const action = firstGitPositional(parsed.tail);
+		if (action === "delete" || action === "expire") return `git reflog ${action} removes recovery history`;
+	}
+	if (
+		command === "worktree" && firstGitPositional(parsed.tail) === "remove" &&
+		(hasEnabledBooleanOption(parsed.tail, "--force") || hasGitShortFlag(parsed.tail, "f", "f"))
+	) return "git worktree remove --force can delete a dirty worktree";
+	if (
+		command === "gc" &&
+		parsed.tail.some((word, index) => word === "--prune=now" || (word === "--prune" && parsed.tail[index + 1] === "now"))
+	) return "git gc --prune=now can permanently remove unreachable objects";
+	if (command === "prune") {
+		if (gitPruneDryRun(parsed.tail)) return undefined;
+		return "git prune can permanently remove unreachable objects";
+	}
+	if (command === "push") return gitPushApprovalReason(parsed.tail);
+	return undefined;
+}
+
+function evaluateGit(invocation: Invocation): PolicyDecision {
+	const reason = gitApprovalReason(invocation.args);
 	return reason ? requireApproval(reason) : allow();
 }
 
@@ -1298,6 +1567,7 @@ export {
 	evaluateAws,
 	evaluateAz,
 	evaluateDocker,
+	evaluateGit,
 	evaluateFind,
 	evaluateGcloud,
 	evaluateRsync,

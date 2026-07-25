@@ -12,6 +12,8 @@ const workloads = {
 	"cloud CLI writes": ["aws ec2 terminate-instances", "az vm delete", "gcloud compute instances delete web"],
 	"Docker allowed commands": ["docker ps", "docker compose up -d", "docker run nginx:latest"],
 	"Docker approval commands": ["docker volume rm database", "docker exec api sh", "docker run --privileged nginx:latest"],
+	"Git allowed commands": ["git status --short", "git restore --staged file.txt", "git push origin main"],
+	"Git approval commands": ["git clean -fdx", "git reset --hard HEAD~1", "git push --force origin main"],
 };
 
 function median(values: number[]): number {

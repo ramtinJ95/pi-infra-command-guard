@@ -349,6 +349,8 @@ test("guarded commands fail closed through shell composition and obfuscation", (
 		"az vm delete --resource-group api --name web",
 			"gcloud compute instances delete web --zone us-central1-a",
 			"docker volume rm database",
+			"git reset --hard HEAD~1",
+			'bash -lc "git status"',
 		"$TOOL delete pod api",
 		'sudo "$TOOL" apply plan.out',
 		'"${KUBECTL}" delete pod api',
@@ -369,6 +371,8 @@ test("guarded commands fail closed through shell composition and obfuscation", (
 		'printf "%s\\n" "az vm delete"',
 			'printf "%s\\n" "gcloud compute instances delete"',
 			'printf "%s\\n" "docker volume rm database"',
+			'printf "%s\\n" "git reset --hard HEAD~1"',
+			"echo git reset --hard HEAD~1",
 	]) {
 		assert.equal(evaluateCommand(command).allow, true, command);
 	}
@@ -384,6 +388,7 @@ test("wrapper matrix cannot hide guarded executables", () => {
 		"az vm delete --resource-group api --name web",
 			"gcloud compute instances delete web --zone us-central1-a",
 			"docker volume rm database",
+			"git reset --hard HEAD~1",
 		"find . -delete",
 		"rm -rf target",
 		"rmdir target",
@@ -420,6 +425,7 @@ test("wrapper matrix cannot hide guarded executables", () => {
 		"env AZURE_CORE_ONLY_SHOW_ERRORS=1 az vm list",
 		"command gcloud projects list",
 		"command docker ps",
+		"command git status --short",
 		"nice -n 5 find . -type f -print",
 		"time -p rsync --dry-run --delete source/ destination/",
 	]) {
@@ -433,6 +439,7 @@ test("individual guard toggles bypass only their configured CLI", () => {
 		aws: "aws ec2 terminate-instances --instance-ids i-123",
 			az: "az vm delete --resource-group api --name web",
 			docker: "docker volume rm database",
+			git: "git reset --hard HEAD~1",
 		find: "find . -delete",
 		gcloud: "gcloud compute instances delete web --zone us-central1-a",
 		helm: "helm uninstall api",
@@ -483,6 +490,7 @@ test("custom allow rules bypass built-in policy after global-option normalizatio
 		aws: { allow: ["ec2 terminate-instances"], requireApproval: [] },
 			az: { allow: ["vm delete"], requireApproval: [] },
 			docker: { allow: ["volume rm dev-*"], requireApproval: [] },
+			git: { allow: ["reset --hard"], requireApproval: [] },
 		find: { allow: [". -delete"], requireApproval: [] },
 		gcloud: { allow: ["compute instances delete"], requireApproval: [] },
 		helm: { allow: ["uninstall"], requireApproval: [] },
@@ -501,6 +509,7 @@ test("custom allow rules bypass built-in policy after global-option normalizatio
 			"az --subscription production vm delete --resource-group api --name web",
 			"docker --context production volume rm dev-database",
 			"docker -Hssh://production.example volume rm dev-database",
+			"git -Crepository reset --hard HEAD~1",
 		"find . -delete",
 		"gcloud --project production compute instances delete web",
 		"helm --kube-context production uninstall api",
@@ -530,12 +539,14 @@ test("custom requireApproval rules override allow rules and built-in safe policy
 		...DEFAULT_COMMAND_OVERRIDES,
 			aws: { allow: [], requireApproval: ["--version"] },
 			docker: { allow: [], requireApproval: ["-v"] },
+			git: { allow: [], requireApproval: ["status"] },
 		gcloud: { allow: ["compute instances list"], requireApproval: ["compute instances list"] },
 		kubectl: { allow: [], requireApproval: ["port-forward"] },
 	};
 	for (const command of [
 			"aws --version",
 			"docker -v",
+			"git -C repository status --short",
 		"gcloud --project production compute instances list",
 		"kubectl port-forward service/api 8080:80",
 	]) {
@@ -548,13 +559,15 @@ test("custom requireApproval rules override allow rules and built-in safe policy
 test("custom allow rules cannot bypass opaque behavior flags", () => {
 	const commands: CommandOverrides = {
 		...DEFAULT_COMMAND_OVERRIDES,
-		gcloud: { allow: ["compute instances list"], requireApproval: [] },
+			gcloud: { allow: ["compute instances list"], requireApproval: [] },
+			git: { allow: ["deploy"], requireApproval: [] },
 		helm: { allow: ["template"], requireApproval: [] },
 		kubectl: { allow: ["get pods"], requireApproval: [] },
 		rsync: { allow: ["-e *", "--rsync-path=*"], requireApproval: [] },
 	};
 	for (const command of [
-		"gcloud compute instances list --flags-file=hidden.yaml",
+			"gcloud compute instances list --flags-file=hidden.yaml",
+			"git -c alias.deploy='!dangerous-command' deploy",
 		"helm template api ./chart --post-renderer ./renderer",
 		"kubectl get pods --raw=/api/v1/secrets",
 		`rsync -e "sh -c 'rm -rf target'" source/ host:destination/`,

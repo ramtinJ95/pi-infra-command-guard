@@ -58,6 +58,7 @@ test("semantics-preserving shell variations cannot hide guarded mutations", () =
 		{ executable: "az", args: "vm delete --resource-group api --name web" },
 			{ executable: "gcloud", args: "compute instances delete web --zone us-central1-a" },
 			{ executable: "docker", args: "volume rm database" },
+			{ executable: "git", args: "reset --hard HEAD~1" },
 		{ executable: "rm", args: "target" },
 	];
 	const wrappers = ["", "env ", "sudo -n ", "command ", "nohup "];
