@@ -115,6 +115,14 @@ Approval is required for `git clean` except dry-run; `reset --hard`; working-tre
 
 Unknown Git subcommands are allowed. The guard does not read repository or user configuration, so inherited aliases, hooks, remote helpers, external `git-*` commands, and checkout forms whose branch/path meaning depends on repository state remain outside command-level classification.
 
+### Vault
+
+Vault uses a strict low-risk allowlist because reads can return secrets and mutations can change authentication or control-plane state. Bare help, help topics, version, status, and common command-specific help forms are allowed. Every other command requires approval.
+
+Guarded operations include `read`, `list`, `unwrap`, KV reads and writes, generic write/delete, login and token operations, auth methods, secrets engines, policies, operator lifecycle commands, agent/server processes, and unknown commands. Narrow `commands.vault.allow` rules can deliberately permit a trusted path or operation after global server/namespace options are normalized.
+
+The guard classifies argv only. Vault policies, response wrapping, namespaces, mount behavior, environment-provided addresses/tokens, and server-side plugin behavior remain outside the lexical policy.
+
 ### Local file tools
 
 Ordinary `find` searches and `rsync` transfers without deletion flags are allowed. `rsync --dry-run` and `rsync -n` remain allowed even when showing what a deletion-enabled transfer would do. Executable-bearing rsync options remain guarded when they contain shell behavior or delegate to another guarded tool. Help/version-only invocations of `unlink`, `rmdir`, `shred`, and `truncate` are also allowed.
@@ -124,6 +132,7 @@ Ordinary `find` searches and `rsync` transfers without deletion flags are allowe
 - Mutating infra commands such as `kubectl delete`, `terraform apply`, `helm upgrade`, `argocd app sync`, `aws ec2 terminate-instances`, `az vm delete`, and `gcloud compute instances delete`
 - Higher-risk Docker commands such as `docker volume rm`, `docker system prune`, `docker exec`, `docker run --privileged`, and `docker --context production compose up`
 - Destructive Git commands such as `git clean -fdx`, `git reset --hard`, `git stash clear`, and `git push --force`
+- Vault secret access and mutations such as `vault read secret/production`, `vault kv get`, `vault write`, and `vault operator seal`
 - `rm` commands
 - Wrapped or path-qualified `rm` commands such as `sudo rm`, `env rm`, and `/bin/rm`
 - `unlink`, `rmdir`, `shred`, and `truncate` mutations
@@ -180,7 +189,7 @@ Every guard is enabled by default. Add only the overrides you need:
 }
 ```
 
-Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `git`, `rm`, `unlink`, `rmdir`, `shred`, `truncate`, `find`, and `rsync`. A disabled guard bypasses policy checks for direct, path-qualified, and recognized wrapper invocations such as `sudo` and `env`. Enabled guards in the same command remain enforced. Dynamic executable expressions such as `$TOOL apply` still require approval while any guard is enabled because the target cannot be identified safely. Opaque shell-runner commands also remain conservative when they mention an enabled guard name.
+Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `git`, `vault`, `rm`, `unlink`, `rmdir`, `shred`, `truncate`, `find`, and `rsync`. A disabled guard bypasses policy checks for direct, path-qualified, and recognized wrapper invocations such as `sudo` and `env`. Enabled guards in the same command remain enforced. Dynamic executable expressions such as `$TOOL apply` still require approval while any guard is enabled because the target cannot be identified safely. Opaque shell-runner commands also remain conservative when they mention an enabled guard name.
 
 Changing guard settings invalidates pending requests and unused one-time approvals. Run the command again under the new configuration if approval is still required.
 
@@ -298,6 +307,7 @@ Version 0.2.0 replaces the 0.1.x `PI_INFRA_COMMAND_GUARD_SOUND_PATH` and `PI_INF
 - This is an in-process policy guard, not an OS sandbox. It cannot know that an inherited alias, shell function, opaque script, or custom executable eventually invokes guarded tooling when the command contains no guarded name or dynamic executable position. Kubernetes RBAC, scoped Terraform credentials, and filesystem permissions remain the hard security boundary.
 - Docker daemon access remains a hard security boundary. The targeted Docker policy cannot infer the active daemon from inherited `DOCKER_HOST`/`DOCKER_CONTEXT` state or detect privileged behavior encoded inside Dockerfiles and Compose files.
 - Git remote permissions, protected branches, and backups remain hard boundaries. The targeted Git policy cannot resolve inherited aliases, hooks, helpers, or repository-dependent branch/path ambiguity.
+- Vault ACLs, scoped tokens, response wrapping, and server audit devices remain hard boundaries. The strict Vault policy cannot infer environment-selected servers or server-side mount/plugin behavior.
 - Interactive approval uses a custom scrollable overlay instead of pi's default confirm popup.
   - `↑` / `↓` scroll
   - `PgUp` / `PgDn` or `Ctrl+u` / `Ctrl+d` page

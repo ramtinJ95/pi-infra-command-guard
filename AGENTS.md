@@ -27,6 +27,7 @@ Use this shape:
     "gcloud": true,
     "docker": true,
     "git": true,
+    "vault": true,
     "find": true,
     "rm": true,
     "rmdir": true,
@@ -57,11 +58,13 @@ Use this shape:
 }
 ```
 
-All guard keys default to `true`; users may specify only overrides. Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `git`, `find`, `rm`, `rmdir`, `rsync`, `shred`, `truncate`, and `unlink`. Disabled guards bypass checks for that executable while enabled guards in mixed commands remain enforced. If every guard is disabled, dynamic executable and interactive-session restrictions are also bypassed because no guarded target remains.
+All guard keys default to `true`; users may specify only overrides. Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `git`, `vault`, `find`, `rm`, `rmdir`, `rsync`, `shred`, `truncate`, and `unlink`. Disabled guards bypass checks for that executable while enabled guards in mixed commands remain enforced. If every guard is disabled, dynamic executable and interactive-session restrictions are also bypassed because no guarded target remains.
 
 The Docker policy is targeted rather than fail-closed: it guards resource removal/pruning, destructive Compose flags, arbitrary container execution, privileged or host-control options, Docker control-plane and registry changes, and mutations aimed at an explicit CLI host/context. Ordinary diagnostics and development workflows remain allowed, as do unknown `docker` subcommands without a recognized risk. It classifies `docker compose`; the standalone `docker-compose` executable is conservatively approval-required as indirect Docker invocation. It cannot infer endpoints from inherited environment/current-context state or inspect Dockerfiles and Compose files.
 
 The Git policy is also targeted. It guards destructive clean/reset/restore/checkout forms, forced branch and tag deletion, stash/reflog destruction, forced worktree removal, immediate object pruning, and destructive pushes. Ordinary Git commands and unknown subcommands remain allowed. Invocation-local aliases are non-bypassable because they hide behavior; inherited aliases, hooks, helpers, and repository-dependent checkout ambiguity remain outside lexical classification.
+
+The Vault policy is strict: only help, version, status, and common command-specific help forms are allowed by default. Reads, lists, unwraps, KV operations, authentication/token/policy/operator commands, agent/server processes, and unknown commands require approval because they can reveal secrets or change security-critical state. Environment-selected endpoints/tokens and server-side mount/plugin behavior remain outside lexical classification.
 
 The local-file policies require approval for `rm`, mutations through `unlink`, `rmdir`, `shred`, and `truncate`, `find -delete`, and rsync deletion/removal flags. Ordinary `find` searches and `rsync` transfers remain allowed, as do rsync dry runs. Rsync options that can supply executable commands remain non-bypassable when they contain shell behavior or another guarded tool. Keep these as individual guard keys so users can disable or customize one tool without weakening the others.
 
