@@ -99,6 +99,14 @@ Stable commands with explicit read-style actions such as `list`, `show`, `get-*`
 
 Stable commands with explicit read-style actions such as `list`, `describe`, `get-*`, `read`, `search-*`, logs, storage `cat`/`du`/`hash`, IAM policy troubleshooting, `status`, and operation waits are allowed. Authentication-token output, credential retrieval, and Secret Manager reads remain guarded. `alpha`, `beta`, `--flags-file`, mutating, and unknown commands fail closed.
 
+### Docker
+
+Docker uses a targeted high-risk policy rather than a strict command allowlist. Normal diagnostics and common local workflows remain allowed, including listing, logs, inspect, build, pull, ordinary run/start/stop, and `docker compose up` or `down` without data-removal flags.
+
+Approval is required for resource removal and pruning; `docker compose rm`; Compose volume/image/orphan removal; `exec`, `debug`, and Compose `exec`/`run`; privileged containers; high-impact capabilities, devices, host namespaces, host-root or Docker-socket mounts, and insecure build entitlements; Swarm and control-plane changes; registry writes and credential changes; and mutations directed through explicit `--context`/`-c` or `--host`/`-H` options. Read-only commands against an explicit endpoint remain allowed. Documented Compose dry runs remain allowed for removal previews.
+
+The policy classifies the current `docker compose` subcommand. The deprecated standalone `docker-compose` executable has no command-level classifier and is conservatively approval-required as indirect Docker invocation. Unknown `docker` subcommands are allowed unless they contain a recognized risk. The guard cannot see a Docker endpoint selected through inherited environment variables or the current saved context, and it does not inspect Dockerfiles or Compose files for privileged behavior.
+
 ### Local file tools
 
 Ordinary `find` searches and `rsync` transfers without deletion flags are allowed. `rsync --dry-run` and `rsync -n` remain allowed even when showing what a deletion-enabled transfer would do. Executable-bearing rsync options remain guarded when they contain shell behavior or delegate to another guarded tool. Help/version-only invocations of `unlink`, `rmdir`, `shred`, and `truncate` are also allowed.
@@ -106,6 +114,7 @@ Ordinary `find` searches and `rsync` transfers without deletion flags are allowe
 ## What requires approval
 
 - Mutating infra commands such as `kubectl delete`, `terraform apply`, `helm upgrade`, `argocd app sync`, `aws ec2 terminate-instances`, `az vm delete`, and `gcloud compute instances delete`
+- Higher-risk Docker commands such as `docker volume rm`, `docker system prune`, `docker exec`, `docker run --privileged`, and `docker --context production compose up`
 - `rm` commands
 - Wrapped or path-qualified `rm` commands such as `sudo rm`, `env rm`, and `/bin/rm`
 - `unlink`, `rmdir`, `shred`, and `truncate` mutations
@@ -162,7 +171,7 @@ Every guard is enabled by default. Add only the overrides you need:
 }
 ```
 
-Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `rm`, `unlink`, `rmdir`, `shred`, `truncate`, `find`, and `rsync`. A disabled guard bypasses policy checks for direct, path-qualified, and recognized wrapper invocations such as `sudo` and `env`. Enabled guards in the same command remain enforced. Dynamic executable expressions such as `$TOOL apply` still require approval while any guard is enabled because the target cannot be identified safely. Opaque shell-runner commands also remain conservative when they mention an enabled guard name.
+Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `rm`, `unlink`, `rmdir`, `shred`, `truncate`, `find`, and `rsync`. A disabled guard bypasses policy checks for direct, path-qualified, and recognized wrapper invocations such as `sudo` and `env`. Enabled guards in the same command remain enforced. Dynamic executable expressions such as `$TOOL apply` still require approval while any guard is enabled because the target cannot be identified safely. Opaque shell-runner commands also remain conservative when they mention an enabled guard name.
 
 Changing guard settings invalidates pending requests and unused one-time approvals. Run the command again under the new configuration if approval is still required.
 
@@ -278,6 +287,7 @@ Version 0.2.0 replaces the 0.1.x `PI_INFRA_COMMAND_GUARD_SOUND_PATH` and `PI_INF
 - Interactive shell/interpreter sessions requested with `tty=true` are denied rather than approvable because later `write_stdin` input cannot be classified reliably. Run complete non-interactive commands instead.
 - Code Mode TOML custom tools execute their configured programs directly and are trusted capabilities outside this `exec_command` guard.
 - This is an in-process policy guard, not an OS sandbox. It cannot know that an inherited alias, shell function, opaque script, or custom executable eventually invokes guarded tooling when the command contains no guarded name or dynamic executable position. Kubernetes RBAC, scoped Terraform credentials, and filesystem permissions remain the hard security boundary.
+- Docker daemon access remains a hard security boundary. The targeted Docker policy cannot infer the active daemon from inherited `DOCKER_HOST`/`DOCKER_CONTEXT` state or detect privileged behavior encoded inside Dockerfiles and Compose files.
 - Interactive approval uses a custom scrollable overlay instead of pi's default confirm popup.
   - `↑` / `↓` scroll
   - `PgUp` / `PgDn` or `Ctrl+u` / `Ctrl+d` page
@@ -308,4 +318,4 @@ npm run test:package
 npm run benchmark:policy
 ```
 
-The cloud policy corpus covers hundreds of documented read, mutation, sensitive-read, authentication, and local-configuration decisions. Each decision is exercised through path-qualified executables, wrappers, global-option placements, shell composition, pipelines, and simple executable obfuscation.
+The cloud and command policy corpora cover hundreds of documented read, mutation, sensitive-read, authentication, local-configuration, container, and destructive-file decisions. Decisions are exercised through path-qualified executables, wrappers, global-option placements, shell composition, pipelines, and simple executable obfuscation.

@@ -25,6 +25,7 @@ Use this shape:
     "aws": true,
     "az": true,
     "gcloud": true,
+    "docker": true,
     "find": true,
     "rm": true,
     "rmdir": true,
@@ -55,7 +56,9 @@ Use this shape:
 }
 ```
 
-All guard keys default to `true`; users may specify only overrides. Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `find`, `rm`, `rmdir`, `rsync`, `shred`, `truncate`, and `unlink`. Disabled guards bypass checks for that executable while enabled guards in mixed commands remain enforced. If every guard is disabled, dynamic executable and interactive-session restrictions are also bypassed because no guarded target remains.
+All guard keys default to `true`; users may specify only overrides. Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `find`, `rm`, `rmdir`, `rsync`, `shred`, `truncate`, and `unlink`. Disabled guards bypass checks for that executable while enabled guards in mixed commands remain enforced. If every guard is disabled, dynamic executable and interactive-session restrictions are also bypassed because no guarded target remains.
+
+The Docker policy is targeted rather than fail-closed: it guards resource removal/pruning, destructive Compose flags, arbitrary container execution, privileged or host-control options, Docker control-plane and registry changes, and mutations aimed at an explicit CLI host/context. Ordinary diagnostics and development workflows remain allowed, as do unknown `docker` subcommands without a recognized risk. It classifies `docker compose`; the standalone `docker-compose` executable is conservatively approval-required as indirect Docker invocation. It cannot infer endpoints from inherited environment/current-context state or inspect Dockerfiles and Compose files.
 
 The local-file policies require approval for `rm`, mutations through `unlink`, `rmdir`, `shred`, and `truncate`, `find -delete`, and rsync deletion/removal flags. Ordinary `find` searches and `rsync` transfers remain allowed, as do rsync dry runs. Rsync options that can supply executable commands remain non-bypassable when they contain shell behavior or another guarded tool. Keep these as individual guard keys so users can disable or customize one tool without weakening the others.
 
@@ -128,7 +131,7 @@ After editing the file, have the user run `/infra-guard-notify-test`. Terminal p
 
 Keep tool-specific policy out of `shell.ts`. Add an executable name in `guarded-executables.ts`, implement its rules in `tool-policies.ts`, and register its evaluator in `policy.ts`; the typed registry fails type-checking when a guarded executable has no evaluator. Global `Symbol.for(...)` keys are reload compatibility boundaries and must remain byte-for-byte stable.
 
-Tests mirror module ownership (`attention.test.ts`, `shell.test.ts`, `policy.test.ts`, `approvals.test.ts`, and `code-mode.test.ts`). Keep cross-module Pi lifecycle coverage in `extension.test.ts`. `index.test.ts` is only the aggregate runner; do not restore a production `_test` export to reach internals. Shell fuzzing must be deterministic so CI failures are reproducible.
+Tests mirror module ownership (`attention.test.ts`, `shell.test.ts`, `policy.test.ts`, `command-policy-corpus.test.ts`, `approvals.test.ts`, and `code-mode.test.ts`). Keep cross-module Pi lifecycle coverage in `extension.test.ts`. `index.test.ts` is only the aggregate runner; do not restore a production `_test` export to reach internals. Shell fuzzing must be deterministic so CI failures are reproducible.
 
 ### Checks
 
