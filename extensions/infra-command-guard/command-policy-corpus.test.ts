@@ -230,11 +230,87 @@ const GIT_APPROVALS = [
 	"git --future-global-option status",
 ];
 
+const VAULT_ALLOWED = [
+	"vault",
+	"vault -h",
+	"vault -help",
+	"vault --help",
+	"vault -version",
+	"vault --version",
+	"vault help",
+	"vault help read",
+	"vault version",
+	"vault status",
+	"vault status -format=json",
+	"vault status -address=https://vault.example.com",
+	"vault -address=https://vault.example.com status",
+	"vault -address https://vault.example.com status",
+	"vault -namespace=team status",
+	"vault status -tls-skip-verify",
+	"vault read -help",
+	"vault read --help",
+	"vault kv get -help",
+	"vault operator -help",
+];
+
+const VAULT_APPROVALS = [
+	"vault read secret/production",
+	"vault -address=https://vault.example.com read secret/production",
+	"vault list secret/metadata",
+	"vault unwrap wrapped-token",
+	"vault kv get secret/production",
+	"vault kv list secret/",
+	"vault write secret/production password=value",
+	"vault write secret/production value=-help",
+	"vault kv get -mount -help secret/production",
+	"vault delete secret/production",
+	"vault kv put secret/production password=value",
+	"vault kv patch secret/production password=value",
+	"vault kv delete secret/production",
+	"vault kv destroy -versions=1 secret/production",
+	"vault kv undelete -versions=1 secret/production",
+	"vault kv metadata delete secret/production",
+	"vault kv rollback -version=1 secret/production",
+	"vault login token=value",
+	"vault token create -policy=deploy",
+	"vault token revoke token-value",
+	"vault token renew token-value",
+	"vault token lookup",
+	"vault auth list",
+	"vault auth enable userpass",
+	"vault auth disable userpass",
+	"vault secrets list",
+	"vault secrets enable kv-v2",
+	"vault secrets disable secret/",
+	"vault policy list",
+	"vault policy read deploy",
+	"vault policy write deploy policy.hcl",
+	"vault policy delete deploy",
+	"vault operator init",
+	"vault operator unseal unseal-key",
+	"vault operator seal",
+	"vault operator rekey",
+	"vault operator rotate",
+	"vault operator generate-root",
+	"vault operator step-down",
+	"vault operator raft snapshot restore backup.snap",
+	"vault agent -config=agent.hcl",
+	"vault server -config=server.hcl",
+	"vault ssh user@host",
+	"vault lease revoke database/creds/app/id",
+	"vault audit enable file file_path=audit.log",
+	"vault plugin register secret example-plugin",
+	"vault namespace list",
+	"vault monitor",
+	"vault future-command --future-option",
+	"vault -future-global-option status",
+];
+
 function replaceExecutable(command: string, current: string, replacement: string): string {
 	return command.replace(new RegExp(`^${current}`), replacement);
 }
 
-function variants(executable: "docker" | "git", command: string): string[] {
+function variants(executable: "docker" | "git" | "vault", command: string): string[] {
 	const midpoint = Math.max(1, Math.floor(executable.length / 2));
 	const obfuscated = `${executable.slice(0, midpoint)}"${executable.slice(midpoint)}"`;
 	return [
@@ -274,6 +350,21 @@ test(`Git policy corpus: ${GIT_ALLOWED.length + GIT_APPROVALS.length} decisions`
 	}
 	for (const command of GIT_APPROVALS) {
 		for (const variant of variants("git", command)) {
+			assert.equal(evaluateCommand(variant).allow, false, `unexpected allow: ${variant}`);
+		}
+	}
+});
+
+test(`Vault policy corpus: ${VAULT_ALLOWED.length + VAULT_APPROVALS.length} decisions`, () => {
+	assert.ok(VAULT_ALLOWED.length >= 15);
+	assert.ok(VAULT_APPROVALS.length >= 40);
+	for (const command of VAULT_ALLOWED) {
+		for (const variant of variants("vault", command)) {
+			assert.equal(evaluateCommand(variant).allow, true, `unexpected approval: ${variant}`);
+		}
+	}
+	for (const command of VAULT_APPROVALS) {
+		for (const variant of variants("vault", command)) {
 			assert.equal(evaluateCommand(variant).allow, false, `unexpected allow: ${variant}`);
 		}
 	}

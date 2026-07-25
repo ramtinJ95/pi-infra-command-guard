@@ -8,6 +8,7 @@ const GUARDED_EXECUTABLES = [
 	"gcloud",
 	"docker",
 	"git",
+	"vault",
 	"find",
 	"rmdir",
 	"rm",
@@ -27,9 +28,9 @@ const DEFAULT_GUARD_SETTINGS = {
 	aws: true,
 	az: true,
 	docker: true,
-	git: true,
 	find: true,
 	gcloud: true,
+	git: true,
 	helm: true,
 	kubectl: true,
 	rm: true,
@@ -39,6 +40,7 @@ const DEFAULT_GUARD_SETTINGS = {
 	terraform: true,
 	truncate: true,
 	unlink: true,
+	vault: true,
 } satisfies GuardSettings;
 
 const DEFAULT_COMMAND_OVERRIDES = {
@@ -46,9 +48,9 @@ const DEFAULT_COMMAND_OVERRIDES = {
 	aws: { allow: [], requireApproval: [] },
 	az: { allow: [], requireApproval: [] },
 	docker: { allow: [], requireApproval: [] },
-	git: { allow: [], requireApproval: [] },
 	find: { allow: [], requireApproval: [] },
 	gcloud: { allow: [], requireApproval: [] },
+	git: { allow: [], requireApproval: [] },
 	helm: { allow: [], requireApproval: [] },
 	kubectl: { allow: [], requireApproval: [] },
 	rm: { allow: [], requireApproval: [] },
@@ -58,6 +60,7 @@ const DEFAULT_COMMAND_OVERRIDES = {
 	terraform: { allow: [], requireApproval: [] },
 	truncate: { allow: [], requireApproval: [] },
 	unlink: { allow: [], requireApproval: [] },
+	vault: { allow: [], requireApproval: [] },
 } satisfies CommandOverrides;
 
 function enabledGuardedExecutables(settings: GuardSettings): GuardedExecutable[] {

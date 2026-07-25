@@ -91,6 +91,10 @@ test("command override config validates and normalizes per-CLI rules", () => {
 		allow: [],
 		requireApproval: ["status"],
 	});
+	assert.deepEqual(parseCommandOverrides({ commands: { vault: { allow: ["read secret/dev"] } } }, configPath).vault, {
+		allow: ["read secret/dev"],
+		requireApproval: [],
+	});
 	assert.throws(
 		() => parseCommandOverrides({ commands: { aws: { allow: [`list${" ".repeat(509)}`] } } }, configPath),
 		/cannot exceed 512 characters/,
@@ -100,7 +104,7 @@ test("command override config validates and normalizes per-CLI rules", () => {
 test("guard config defaults to enabled, accepts partial overrides, and reloads from disk", () => {
 	const configPath = "/home/test/.pi/agent/infra-command-guard.json";
 	assert.deepEqual(parseGuardSettings({}, configPath), DEFAULT_GUARD_SETTINGS);
-	assert.deepEqual(parseGuardSettings({ guards: { az: false, docker: false, find: false, git: false, rm: false, unlink: false } }, configPath), {
+	assert.deepEqual(parseGuardSettings({ guards: { az: false, docker: false, find: false, git: false, rm: false, unlink: false, vault: false } }, configPath), {
 		...DEFAULT_GUARD_SETTINGS,
 		az: false,
 		docker: false,
@@ -108,6 +112,7 @@ test("guard config defaults to enabled, accepts partial overrides, and reloads f
 		git: false,
 		rm: false,
 		unlink: false,
+		vault: false,
 	});
 	assert.throws(() => parseGuardSettings({ guards: [] }, configPath), /guards must be a JSON object/);
 	assert.throws(() => parseGuardSettings({ guards: { azure: false } }, configPath), /unknown field: azure/);

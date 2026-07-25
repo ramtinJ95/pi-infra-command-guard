@@ -514,14 +514,70 @@ const GIT_GLOBAL_OPTIONS: ToolGlobalOptions = {
 	attachedValue: new Set(["-C", "-c"]),
 };
 
+const VAULT_LEADING_BOOLEAN_OPTIONS = new Set([
+	"-disable-redirects",
+	"--disable-redirects",
+	"-h",
+	"-help",
+	"--help",
+	"-non-interactive",
+	"--non-interactive",
+	"-output-curl-string",
+	"--output-curl-string",
+	"-output-policy",
+	"--output-policy",
+	"-policy-override",
+	"--policy-override",
+	"-tls-skip-verify",
+	"--tls-skip-verify",
+	"-version",
+	"--version",
+]);
+const VAULT_LEADING_VALUE_OPTIONS = new Set([
+	"-address",
+	"--address",
+	"-agent-address",
+	"--agent-address",
+	"-ca-cert",
+	"--ca-cert",
+	"-ca-path",
+	"--ca-path",
+	"-client-cert",
+	"--client-cert",
+	"-client-key",
+	"--client-key",
+	"-field",
+	"--field",
+	"-format",
+	"--format",
+	"-header",
+	"--header",
+	"-mfa",
+	"--mfa",
+	"-namespace",
+	"--namespace",
+	"-output",
+	"--output",
+	"-tls-server-name",
+	"--tls-server-name",
+	"-token",
+	"--token",
+	"-wrap-ttl",
+	"--wrap-ttl",
+]);
+const VAULT_GLOBAL_OPTIONS: ToolGlobalOptions = {
+	boolean: VAULT_LEADING_BOOLEAN_OPTIONS,
+	value: VAULT_LEADING_VALUE_OPTIONS,
+};
+
 const TOOL_GLOBAL_OPTIONS = {
 	argocd: { boolean: ARGOCD_LEADING_BOOLEAN_OPTIONS, value: ARGOCD_LEADING_VALUE_OPTIONS },
 	aws: { boolean: AWS_LEADING_BOOLEAN_OPTIONS, value: AWS_LEADING_VALUE_OPTIONS },
 	az: { boolean: AZ_LEADING_BOOLEAN_OPTIONS, value: AZ_LEADING_VALUE_OPTIONS },
 	docker: DOCKER_GLOBAL_OPTIONS,
 	find: { boolean: new Set<string>(), value: new Set<string>() },
-	git: GIT_GLOBAL_OPTIONS,
 	gcloud: { boolean: GCLOUD_LEADING_BOOLEAN_OPTIONS, value: GCLOUD_LEADING_VALUE_OPTIONS },
+	git: GIT_GLOBAL_OPTIONS,
 	helm: { boolean: HELM_LEADING_BOOLEAN_OPTIONS, value: HELM_LEADING_VALUE_OPTIONS },
 	kubectl: { boolean: KUBECTL_LEADING_BOOLEAN_OPTIONS, value: KUBECTL_LEADING_VALUE_OPTIONS },
 	rm: { boolean: new Set<string>(), value: new Set<string>() },
@@ -531,6 +587,7 @@ const TOOL_GLOBAL_OPTIONS = {
 	terraform: { boolean: TERRAFORM_LEADING_BOOLEAN_OPTIONS, value: TERRAFORM_LEADING_VALUE_OPTIONS },
 	truncate: { boolean: new Set<string>(), value: new Set<string>() },
 	unlink: { boolean: new Set<string>(), value: new Set<string>() },
+	vault: VAULT_GLOBAL_OPTIONS,
 } satisfies Record<GuardedExecutable, ToolGlobalOptions>;
 const COMMAND_LIKE_GLOBAL_OPTIONS = new Set(["-h", "--help", "-version", "--version"]);
 
@@ -541,7 +598,11 @@ function normalizeOverrideArguments(executable: GuardedExecutable, args: string[
 		const word = args[index];
 		const name = optionName(word);
 		if (options.boolean.has(name)) {
-			if (COMMAND_LIKE_GLOBAL_OPTIONS.has(name) || (executable === "docker" && name === "-v")) normalized.push(word);
+			if (
+				COMMAND_LIKE_GLOBAL_OPTIONS.has(name) ||
+				(executable === "docker" && name === "-v") ||
+				(executable === "vault" && name === "-help")
+			) normalized.push(word);
 			continue;
 		}
 		if (options.value.has(name)) {
@@ -1082,7 +1143,7 @@ function hasGitShortFlag(args: readonly string[], flag: string, clusterCharacter
 	return false;
 }
 
-function firstGitPositional(args: readonly string[]): string {
+function firstPositionalBeforeDelimiter(args: readonly string[]): string {
 	const delimiter = args.indexOf("--");
 	const candidates = delimiter === -1 ? args : args.slice(0, delimiter);
 	return (candidates.find((word) => !word.startsWith("-") || word === "-") || "").toLowerCase();
@@ -1237,15 +1298,15 @@ function gitApprovalReason(args: readonly string[]): string | undefined {
 		return "git tag deletion removes a local tag ref";
 	}
 	if (command === "stash") {
-		const action = firstGitPositional(parsed.tail);
+		const action = firstPositionalBeforeDelimiter(parsed.tail);
 		if (action === "drop" || action === "clear") return `git stash ${action} removes saved work`;
 	}
 	if (command === "reflog") {
-		const action = firstGitPositional(parsed.tail);
+		const action = firstPositionalBeforeDelimiter(parsed.tail);
 		if (action === "delete" || action === "expire") return `git reflog ${action} removes recovery history`;
 	}
 	if (
-		command === "worktree" && firstGitPositional(parsed.tail) === "remove" &&
+		command === "worktree" && firstPositionalBeforeDelimiter(parsed.tail) === "remove" &&
 		(hasEnabledBooleanOption(parsed.tail, "--force") || hasGitShortFlag(parsed.tail, "f", "f"))
 	) return "git worktree remove --force can delete a dirty worktree";
 	if (
@@ -1262,6 +1323,38 @@ function gitApprovalReason(args: readonly string[]): string | undefined {
 
 function evaluateGit(invocation: Invocation): PolicyDecision {
 	const reason = gitApprovalReason(invocation.args);
+	return reason ? requireApproval(reason) : allow();
+}
+
+function hasVaultHelpOption(args: readonly string[]): boolean {
+	const isHelp = (word: string | undefined): boolean => word === "-h" || word === "-help" || word === "--help";
+	return isHelp(args[0]) || (!!args[0] && !args[0].startsWith("-") && isHelp(args[1]));
+}
+
+function vaultApprovalReason(args: readonly string[]): string | undefined {
+	const parsed = parseLeadingCommand(args, VAULT_GLOBAL_OPTIONS);
+	if ("error" in parsed) return `vault uses an unsupported global flag layout (${parsed.error})`;
+	const command = (parsed.command || "").toLowerCase();
+	if (!command || command === "help" || command === "version" || command === "status" || hasVaultHelpOption(parsed.tail)) {
+		return undefined;
+	}
+	const nested = firstPositionalBeforeDelimiter(parsed.tail);
+	if (
+		command === "read" || command === "list" || command === "unwrap" ||
+		(command === "kv" && (nested === "get" || nested === "list"))
+	) return `vault ${command}${nested ? ` ${nested}` : ""} may expose secret material`;
+	if (command === "write" || command === "delete" || command === "kv") {
+		return `vault ${command}${nested ? ` ${nested}` : ""} changes Vault data or configuration`;
+	}
+	if (["auth", "login", "operator", "policy", "secrets", "token"].includes(command)) {
+		return `vault ${command}${nested ? ` ${nested}` : ""} accesses or changes security-critical Vault state`;
+	}
+	if (command === "agent" || command === "server") return `vault ${command} starts a long-running secret-handling process`;
+	return `vault ${command} is not on the low-risk allowlist`;
+}
+
+function evaluateVault(invocation: Invocation): PolicyDecision {
+	const reason = vaultApprovalReason(invocation.args);
 	return reason ? requireApproval(reason) : allow();
 }
 
@@ -1568,6 +1661,7 @@ export {
 	evaluateAz,
 	evaluateDocker,
 	evaluateGit,
+	evaluateVault,
 	evaluateFind,
 	evaluateGcloud,
 	evaluateRsync,

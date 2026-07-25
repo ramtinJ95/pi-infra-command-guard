@@ -351,6 +351,7 @@ test("guarded commands fail closed through shell composition and obfuscation", (
 			"docker volume rm database",
 			"git reset --hard HEAD~1",
 			'bash -lc "git status"',
+			"vault read secret/production",
 		"$TOOL delete pod api",
 		'sudo "$TOOL" apply plan.out',
 		'"${KUBECTL}" delete pod api',
@@ -373,6 +374,7 @@ test("guarded commands fail closed through shell composition and obfuscation", (
 			'printf "%s\\n" "docker volume rm database"',
 			'printf "%s\\n" "git reset --hard HEAD~1"',
 			"echo git reset --hard HEAD~1",
+			'printf "%s\\n" "vault read secret/production"',
 	]) {
 		assert.equal(evaluateCommand(command).allow, true, command);
 	}
@@ -389,6 +391,7 @@ test("wrapper matrix cannot hide guarded executables", () => {
 			"gcloud compute instances delete web --zone us-central1-a",
 			"docker volume rm database",
 			"git reset --hard HEAD~1",
+			"vault read secret/production",
 		"find . -delete",
 		"rm -rf target",
 		"rmdir target",
@@ -426,6 +429,7 @@ test("wrapper matrix cannot hide guarded executables", () => {
 		"command gcloud projects list",
 		"command docker ps",
 		"command git status --short",
+		"command vault status",
 		"nice -n 5 find . -type f -print",
 		"time -p rsync --dry-run --delete source/ destination/",
 	]) {
@@ -440,6 +444,7 @@ test("individual guard toggles bypass only their configured CLI", () => {
 			az: "az vm delete --resource-group api --name web",
 			docker: "docker volume rm database",
 			git: "git reset --hard HEAD~1",
+			vault: "vault read secret/production",
 		find: "find . -delete",
 		gcloud: "gcloud compute instances delete web --zone us-central1-a",
 		helm: "helm uninstall api",
@@ -491,6 +496,7 @@ test("custom allow rules bypass built-in policy after global-option normalizatio
 			az: { allow: ["vm delete"], requireApproval: [] },
 			docker: { allow: ["volume rm dev-*"], requireApproval: [] },
 			git: { allow: ["reset --hard"], requireApproval: [] },
+			vault: { allow: ["read secret/development"], requireApproval: [] },
 		find: { allow: [". -delete"], requireApproval: [] },
 		gcloud: { allow: ["compute instances delete"], requireApproval: [] },
 		helm: { allow: ["uninstall"], requireApproval: [] },
@@ -510,6 +516,7 @@ test("custom allow rules bypass built-in policy after global-option normalizatio
 			"docker --context production volume rm dev-database",
 			"docker -Hssh://production.example volume rm dev-database",
 			"git -Crepository reset --hard HEAD~1",
+			"vault -address=https://vault.example.com read secret/development",
 		"find . -delete",
 		"gcloud --project production compute instances delete web",
 		"helm --kube-context production uninstall api",
@@ -540,6 +547,7 @@ test("custom requireApproval rules override allow rules and built-in safe policy
 			aws: { allow: [], requireApproval: ["--version"] },
 			docker: { allow: [], requireApproval: ["-v"] },
 			git: { allow: [], requireApproval: ["status"] },
+			vault: { allow: [], requireApproval: ["status", "-help"] },
 		gcloud: { allow: ["compute instances list"], requireApproval: ["compute instances list"] },
 		kubectl: { allow: [], requireApproval: ["port-forward"] },
 	};
@@ -547,6 +555,8 @@ test("custom requireApproval rules override allow rules and built-in safe policy
 			"aws --version",
 			"docker -v",
 			"git -C repository status --short",
+			"vault -address=https://vault.example.com status",
+			"vault -help",
 		"gcloud --project production compute instances list",
 		"kubectl port-forward service/api 8080:80",
 	]) {

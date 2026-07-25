@@ -16,6 +16,7 @@ const ALL_GUARDS_DISABLED = {
 	az: false,
 	docker: false,
 	git: false,
+	vault: false,
 	find: false,
 	gcloud: false,
 	helm: false,

@@ -14,6 +14,8 @@ const workloads = {
 	"Docker approval commands": ["docker volume rm database", "docker exec api sh", "docker run --privileged nginx:latest"],
 	"Git allowed commands": ["git status --short", "git restore --staged file.txt", "git push origin main"],
 	"Git approval commands": ["git clean -fdx", "git reset --hard HEAD~1", "git push --force origin main"],
+	"Vault allowed commands": ["vault status", "vault version", "vault help read"],
+	"Vault approval commands": ["vault read secret/production", "vault write secret/production value=x", "vault operator seal"],
 };
 
 function median(values: number[]): number {
