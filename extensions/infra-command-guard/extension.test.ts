@@ -219,10 +219,11 @@ test("extension reloads guard toggles and command rules for each command", async
 	process.env.PI_CODING_AGENT_DIR = directory;
 	try {
 		const handlers = new Map<string, Array<(event: any, context: any) => unknown>>();
+		const tools: any[] = [];
 		const pi = {
 			events: {},
 			registerCommand() {},
-			registerTool() {},
+			registerTool(tool: any) { tools.push(tool); },
 			on(name: string, handler: (event: any, context: any) => unknown) {
 				handlers.set(name, [...(handlers.get(name) ?? []), handler]);
 			},
@@ -253,6 +254,28 @@ test("extension reloads guard toggles and command rules for each command", async
 		const store = (pi.events as Record<PropertyKey, unknown>)[APPROVAL_STORE_KEY] as { approve: (...args: string[]) => { ok: boolean } };
 		assert.equal(store.approve(requestId, "rm enabled", "rm command needs confirmation").ok, true);
 
+		const searchCommand = "rg kubectl README.md";
+		writeFileSync(configPath, JSON.stringify({}));
+		const conservativeSearch = await toolCall(
+			{ toolName: "exec_command", input: { cmd: searchCommand } },
+			context,
+		) as { block: boolean; reason: string };
+		assert.equal(conservativeSearch.block, true);
+		assert.match(conservativeSearch.reason, /invokes guarded tooling/);
+
+		writeFileSync(configPath, JSON.stringify({ guardUnclassifiedCommands: false }));
+		assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: searchCommand } }, context), undefined);
+		const incompatibleCodeMode = await toolCall({ toolName: "exec", input: { code: "dynamic" } }, context) as {
+			block: boolean;
+			reason: string;
+		};
+		assert.equal(incompatibleCodeMode.block, true);
+		assert.match(incompatibleCodeMode.reason, /cannot safely intercept Code Mode/);
+		const stillRisky = await toolCall({ toolName: "exec_command", input: { cmd: "rm enabled" } }, context) as { block: boolean };
+		assert.equal(stillRisky.block, true, "changing the mode invalidates the unused approval and keeps known risk guarded");
+		const bash = tools.find((tool) => tool.name === "bash")!;
+		await bash.execute("relaxed-bash", { command: searchCommand }, undefined, undefined, context);
+
 		writeFileSync(configPath, JSON.stringify({ guards: ALL_GUARDS_DISABLED }));
 		assert.equal(await toolCall({ toolName: "exec", input: { code: "dynamic" } }, context), undefined);
 
@@ -266,11 +289,16 @@ test("extension reloads guard toggles and command rules for each command", async
 		assert.equal(customRequired.block, true);
 		assert.match(customRequired.reason, /Custom command rule requires approval/);
 
-		writeFileSync(configPath, JSON.stringify({ guards: { rm: "off" } }));
+		writeFileSync(configPath, JSON.stringify({ guardUnclassifiedCommands: "off" }));
 		const invalid = await toolCall({ toolName: "exec_command", input: { cmd: "rm enabled" } }, context) as { block: boolean };
 		assert.equal(invalid.block, true);
 		assert.equal(warnings.length, 1);
 		assert.match(warnings[0]!, /All command guards remain enabled/);
+		const invalidSearch = await toolCall(
+			{ toolName: "exec_command", input: { cmd: searchCommand } },
+			context,
+		) as { block: boolean };
+		assert.equal(invalidSearch.block, true, "invalid mode falls back to conservative classification");
 		await toolCall({ toolName: "exec_command", input: { cmd: "rm invalid-config-again" } }, context);
 		assert.equal(warnings.length, 1);
 	} finally {
@@ -323,22 +351,33 @@ test("Code Mode reloads guard toggles and command rules without losing intercept
 		);
 		assert.equal(invokeCount, 1);
 
+		const searchCommand = "rg kubectl README.md";
+		writeFileSync(configPath, JSON.stringify({ guardUnclassifiedCommands: false }));
+		await nested.invoke({ cmd: searchCommand }, { cwd: "/tmp", extensionContext: context });
+		assert.equal(invokeCount, 2);
+		writeFileSync(configPath, JSON.stringify({ guardUnclassifiedCommands: true }));
+		await assert.rejects(
+			nested.invoke({ cmd: searchCommand }, { cwd: "/tmp", extensionContext: context }),
+			/invokes guarded tooling/,
+		);
+		assert.equal(invokeCount, 2);
+
 		writeFileSync(configPath, JSON.stringify({ commands: { rm: { allow: ["code-mode-target"] } } }));
 		await nested.invoke({ cmd: "rm code-mode-target" }, { cwd: "/tmp", extensionContext: context });
-		assert.equal(invokeCount, 2);
+		assert.equal(invokeCount, 3);
 		writeFileSync(configPath, JSON.stringify({ commands: { rm: { requireApproval: ["code-mode-target"] } } }));
 		await assert.rejects(
 			nested.invoke({ cmd: "rm code-mode-target" }, { cwd: "/tmp", extensionContext: context }),
 			/Custom command rule requires approval/,
 		);
-		assert.equal(invokeCount, 2);
+		assert.equal(invokeCount, 3);
 
 		writeFileSync(configPath, JSON.stringify({ guards: { rm: "off" } }));
 		await assert.rejects(
 			nested.invoke({ cmd: "rm invalid-config" }, { cwd: "/tmp", extensionContext: context }),
 			/rm command needs confirmation/,
 		);
-		assert.equal(invokeCount, 2);
+		assert.equal(invokeCount, 3);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

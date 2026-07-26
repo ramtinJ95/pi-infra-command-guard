@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
+import { DEFAULT_COMMAND_POLICY_SETTINGS } from "./guarded-executables.ts";
 import { evaluateCommand } from "./policy.ts";
 import { test } from "./test-harness.ts";
+
+const RELAXED_POLICY_SETTINGS = { ...DEFAULT_COMMAND_POLICY_SETTINGS, guardUnclassifiedCommands: false };
 
 type ProviderCorpus = {
 	executable: "aws" | "az" | "gcloud";
 	reads: string[];
 	approvals: string[];
+	unclassified: string[];
 };
 
 const AWS_CORPUS: ProviderCorpus = {
@@ -135,8 +139,8 @@ const AWS_CORPUS: ProviderCorpus = {
 		"aws configure export-credentials",
 		"aws configure import --csv file://credentials.csv",
 		"aws sso login --profile production",
-		"aws madeup inspect-resource",
 	],
+	unclassified: ["aws madeup inspect-resource"],
 };
 
 const AZ_CORPUS: ProviderCorpus = {
@@ -285,6 +289,8 @@ const AZ_CORPUS: ProviderCorpus = {
 		"az search service delete --resource-group production --name index",
 		"az config set extension.use_dynamic_install=yes_without_prompt",
 		"az extension add --name custom-extension",
+	],
+	unclassified: [
 		"az rest --method get --url https://management.azure.com/subscriptions",
 		"az rest --method patch --url https://management.azure.com/resource --body '{}'",
 		"az madeup inspect-resource",
@@ -459,6 +465,8 @@ const GCLOUD_CORPUS: ProviderCorpus = {
 		"gcloud components install beta",
 		"gcloud secrets list",
 		"gcloud secrets versions access latest --secret database",
+	],
+	unclassified: [
 		"gcloud alpha compute instances list",
 		"gcloud beta run services list",
 		"gcloud --flags-file flags.yaml compute instances list",
@@ -510,17 +518,25 @@ function assertCorpus(corpus: ProviderCorpus): void {
 	for (const command of corpus.reads) {
 		for (const variant of variants(corpus, command)) {
 			assert.equal(evaluateCommand(variant).allow, true, `unexpected approval: ${variant}`);
+			assert.equal(evaluateCommand(variant, RELAXED_POLICY_SETTINGS).allow, true, `relaxed read: ${variant}`);
 		}
 	}
 	for (const command of corpus.approvals) {
 		for (const variant of variants(corpus, command)) {
 			assert.equal(evaluateCommand(variant).allow, false, `unexpected allow: ${variant}`);
+			assert.equal(evaluateCommand(variant, RELAXED_POLICY_SETTINGS).allow, false, `relaxed known risk: ${variant}`);
+		}
+	}
+	for (const command of corpus.unclassified) {
+		for (const variant of variants(corpus, command)) {
+			assert.equal(evaluateCommand(variant).allow, false, `conservative uncertainty: ${variant}`);
+			assert.equal(evaluateCommand(variant, RELAXED_POLICY_SETTINGS).allow, true, `relaxed uncertainty: ${variant}`);
 		}
 	}
 }
 
 function corpusTestName(provider: string, corpus: ProviderCorpus): string {
-	const baseCases = corpus.reads.length + corpus.approvals.length;
+	const baseCases = corpus.reads.length + corpus.approvals.length + corpus.unclassified.length;
 	const evaluatedCommands = baseCases * variants(corpus, corpus.reads[0]).length;
 	return `${provider} cloud policy corpus: ${baseCases} decisions across ${evaluatedCommands} command variants`;
 }

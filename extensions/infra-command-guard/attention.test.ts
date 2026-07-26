@@ -19,7 +19,11 @@ import {
 	shouldUseNativeNotification,
 	terminalNotificationSequence,
 } from "./attention.ts";
-import { DEFAULT_COMMAND_OVERRIDES, DEFAULT_GUARD_SETTINGS } from "./guarded-executables.ts";
+import {
+	DEFAULT_COMMAND_OVERRIDES,
+	DEFAULT_COMMAND_POLICY_SETTINGS,
+	DEFAULT_GUARD_SETTINGS,
+} from "./guarded-executables.ts";
 import { test } from "./test-harness.ts";
 
 test("approval attention config is silent by default and resolves sound paths from the agent directory", () => {
@@ -32,6 +36,7 @@ test("approval attention config is silent by default and resolves sound paths fr
 	assert.deepEqual(
 		parseApprovalAttentionSettings(
 			{
+				guardUnclassifiedCommands: false,
 				notifications: { enabled: true, backend: "terminal" },
 				sound: { enabled: true, path: "sounds/approval.wav" },
 				integrations: { herdr: { enabled: false } },
@@ -45,6 +50,7 @@ test("approval attention config is silent by default and resolves sound paths fr
 		},
 	);
 	assert.throws(() => parseApprovalAttentionSettings({ notifications: { enabled: "yes" } }, configPath), /must be true or false/);
+	assert.throws(() => parseApprovalAttentionSettings({ guardUnclassifiedCommands: "no" }, configPath), /must be true or false/);
 	assert.throws(() => parseApprovalAttentionSettings({ notifications: { provider: "kitty" } }, configPath), /unknown field/);
 	assert.throws(() => parseApprovalAttentionSettings({ sound: { enabled: true, path: null } }, configPath), /path must be set/);
 	assert.throws(() => parseApprovalAttentionSettings({ integrations: { herdr: { enabled: "yes" } } }, configPath), /must be true or false/);
@@ -127,11 +133,14 @@ test("guard config defaults to enabled, accepts partial overrides, and reloads f
 		assert.equal(loadGuardSettings(runtimeConfigPath).settings.terraform, true);
 		writeFileSync(runtimeConfigPath, JSON.stringify({ commands: { terraform: { allow: ["output"] } } }));
 		assert.deepEqual(loadPolicySettings(runtimeConfigPath).settings.commands.terraform.allow, ["output"]);
+		assert.equal(loadPolicySettings(runtimeConfigPath).settings.guardUnclassifiedCommands, true);
+		writeFileSync(runtimeConfigPath, JSON.stringify({ guardUnclassifiedCommands: false }));
+		assert.equal(loadPolicySettings(runtimeConfigPath).settings.guardUnclassifiedCommands, false);
 
-		writeFileSync(runtimeConfigPath, JSON.stringify({ guards: { terraform: "off" } }));
-		const invalid = loadGuardSettings(runtimeConfigPath);
-		assert.match(invalid.error ?? "", /guards\.terraform must be true or false/);
-		assert.deepEqual(invalid.settings, DEFAULT_GUARD_SETTINGS);
+		writeFileSync(runtimeConfigPath, JSON.stringify({ guardUnclassifiedCommands: "off" }));
+		const invalid = loadPolicySettings(runtimeConfigPath);
+		assert.match(invalid.error ?? "", /guardUnclassifiedCommands must be true or false/);
+		assert.deepEqual(invalid.settings, DEFAULT_COMMAND_POLICY_SETTINGS);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}

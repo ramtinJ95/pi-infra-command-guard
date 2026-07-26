@@ -18,8 +18,7 @@ import {
 } from "./code-mode.ts";
 import {
 	hasEnabledGuards,
-	type CommandOverrides,
-	type GuardSettings,
+	type CommandPolicySettings,
 } from "./guarded-executables.ts";
 
 const CODE_MODE_PUBLIC_TOOL_NAMES = new Set(["exec", "wait", "functions.exec", "functions.wait"]);
@@ -47,10 +46,7 @@ export default function createExtension(pi: ExtensionAPI) {
 	const currentApprovals = (): ApprovalStore => events[APPROVAL_STORE_KEY] as ApprovalStore;
 	let lastConfigWarning: string | undefined;
 	let lastGuardRevision: string | undefined;
-	const currentPolicySettings = (context?: { ui?: ExtensionContext["ui"] }): {
-		guards: GuardSettings;
-		commands: CommandOverrides;
-	} => {
+	const currentPolicySettings = (context?: { ui?: ExtensionContext["ui"] }): CommandPolicySettings => {
 		const loaded = loadPolicySettings();
 		const revision = `${loaded.error ? `invalid:${loaded.error}:` : "valid:"}${JSON.stringify(loaded.settings)}`;
 		if (lastGuardRevision !== undefined && revision !== lastGuardRevision) {
@@ -97,8 +93,7 @@ export default function createExtension(pi: ExtensionAPI) {
 			currentApprovals(),
 			identity,
 			typeof nestedContext.mode === "string" ? nestedContext.mode : undefined,
-			policySettings.guards,
-			policySettings.commands,
+			policySettings,
 		);
 		if (!guarded.allow) throw new Error(guarded.reason);
 	};
@@ -215,8 +210,7 @@ export default function createExtension(pi: ExtensionAPI) {
 			currentApprovals(),
 			identity,
 			ctx.mode,
-			policySettings.guards,
-			policySettings.commands,
+			policySettings,
 		);
 		return guarded.allow ? undefined : { block: true, reason: guarded.reason };
 	});
@@ -231,8 +225,7 @@ export default function createExtension(pi: ExtensionAPI) {
 				currentApprovals(),
 				identity,
 				ctx.mode,
-				policySettings.guards,
-				policySettings.commands,
+				policySettings,
 			);
 			if (!guarded.allow) throw new Error(guarded.reason);
 			return bashTool.execute(toolCallId, params, signal, onUpdate);

@@ -1,8 +1,9 @@
 import { collectPositionals, normalizeForInfraScan, type Invocation } from "./shell.ts";
 import { GUARDED_EXECUTABLES, type GuardedExecutable } from "./guarded-executables.ts";
 
-type AllowDecision = { allow: true; reason?: undefined };
-type ApprovalDecision = { allow: false; reason: string };
+type ApprovalBasis = "knownRisk" | "unclassified" | "explicitRule";
+type AllowDecision = { allow: true; reason?: undefined; basis?: undefined };
+type ApprovalDecision = { allow: false; reason: string; basis: ApprovalBasis };
 type PolicyDecision = AllowDecision | ApprovalDecision;
 type ToolEvaluator = (invocation: Invocation) => PolicyDecision;
 type ToolGlobalOptions = Readonly<{
@@ -40,6 +41,11 @@ const SAFE_KUBECTL_NESTED = {
 	auth: new Set(["can-i", "whoami"]),
 	rollout: new Set(["history", "status"]),
 };
+const RISKY_KUBECTL_TOP_LEVEL = new Set([
+	"annotate", "apply", "attach", "autoscale", "certificate", "cordon", "cp", "create", "debug", "delete",
+	"drain", "edit", "exec", "expose", "label", "patch", "replace", "run", "scale", "set", "taint", "uncordon",
+]);
+const RISKY_KUBECTL_ROLLOUT_ACTIONS = new Set(["pause", "restart", "resume", "undo"]);
 
 const SAFE_TERRAFORM_TOP_LEVEL = new Set([
 	"fmt",
@@ -55,6 +61,13 @@ const SAFE_TERRAFORM_TOP_LEVEL = new Set([
 const SAFE_TERRAFORM_NESTED = {
 	state: new Set(["list", "show"]),
 	workspace: new Set(["list", "select", "show"]),
+};
+const RISKY_TERRAFORM_TOP_LEVEL = new Set([
+	"apply", "console", "destroy", "force-unlock", "import", "login", "logout", "refresh", "taint", "test", "untaint",
+]);
+const RISKY_TERRAFORM_NESTED = {
+	state: new Set(["mv", "pull", "push", "replace-provider", "rm"]),
+	workspace: new Set(["delete", "new"]),
 };
 
 const SAFE_HELM_TOP_LEVEL = new Set([
@@ -77,6 +90,13 @@ const SAFE_HELM_NESTED = {
 	plugin: new Set(["list"]),
 	repo: new Set(["list"]),
 };
+const RISKY_HELM_TOP_LEVEL = new Set(["install", "push", "rollback", "test", "uninstall", "upgrade"]);
+const RISKY_HELM_NESTED: Readonly<Record<string, ReadonlySet<string>>> = {
+	dependency: new Set(["build", "update"]),
+	plugin: new Set(["install", "uninstall", "update"]),
+	registry: new Set(["login", "logout"]),
+	repo: new Set(["add", "index", "remove", "rm", "update"]),
+};
 
 const SAFE_ARGOCD_TOP_LEVEL = new Set(["completion", "help", "version"]);
 const SAFE_ARGOCD_NESTED = {
@@ -87,6 +107,15 @@ const SAFE_ARGOCD_NESTED = {
 	gpg: new Set(["list"]),
 	proj: new Set(["get", "list"]),
 	repo: new Set(["get", "list"]),
+};
+const RISKY_ARGOCD_TOP_LEVEL = new Set(["login", "logout"]);
+const RISKY_ARGOCD_NESTED: Readonly<Record<string, ReadonlySet<string>>> = {
+	account: new Set(["delete-token", "generate-token", "update-password"]),
+	admin: new Set(["cluster", "dashboard", "export", "import", "initial-password", "notifications"]),
+	app: new Set(["create", "delete", "patch", "patch-resource", "rollback", "set", "sync", "terminate-op", "unset"]),
+	cluster: new Set(["add", "rm", "rotate-auth"]),
+	proj: new Set(["add-destination", "add-source", "create", "delete", "remove-destination", "remove-source", "set"]),
+	repo: new Set(["add", "rm"]),
 };
 
 const AWS_LEADING_BOOLEAN_OPTIONS = new Set([
@@ -157,6 +186,7 @@ const CLOUD_MUTATION_ACTIONS = new Set([
 	"abandon",
 	"apply",
 	"approve",
+	"authorize",
 	"assign",
 	"associate",
 	"attach",
@@ -167,6 +197,7 @@ const CLOUD_MUTATION_ACTIONS = new Set([
 	"clear",
 	"connect",
 	"configure",
+	"config-zip",
 	"clone",
 	"copy",
 	"cp",
@@ -215,6 +246,7 @@ const CLOUD_MUTATION_ACTIONS = new Set([
 	"release",
 	"remove",
 	"replace",
+	"request",
 	"reset",
 	"resize",
 	"restart",
@@ -619,19 +651,19 @@ function normalizeOverrideArguments(executable: GuardedExecutable, args: string[
 
 function evaluateNonBypassableRisk(executable: GuardedExecutable, invocation: Invocation): PolicyDecision | undefined {
 	if (executable === "kubectl" && hasRawKubectlFlag(invocation.args)) {
-		return requireApproval("kubectl --raw is not on the low-risk allowlist");
+		return knownRisk("kubectl --raw is not on the low-risk allowlist");
 	}
 	if (executable === "gcloud" && hasOption(invocation.args, "--flags-file")) {
-		return requireApproval("gcloud --flags-file can hide behavior from lexical classification");
+		return unclassified("gcloud --flags-file can hide behavior from lexical classification");
 	}
 	if (
 		executable === "helm" &&
 		invocation.args.some((arg) => arg === "--post-renderer" || arg.startsWith("--post-renderer="))
 	) {
-		return requireApproval("helm --post-renderer can execute an external program");
+		return knownRisk("helm --post-renderer can execute an external program");
 	}
 	if (executable === "git" && gitInlineAliasRisk(invocation.args)) {
-		return requireApproval("git invocation-local aliases can hide behavior from command policy");
+		return knownRisk("git invocation-local aliases can hide behavior from command policy");
 	}
 	if (executable === "rsync") return evaluateRsyncExecutableOptionRisk(invocation);
 	return undefined;
@@ -659,8 +691,16 @@ function isKubectlPortForwardOnlyCommand(command: string): boolean {
 	return kubectlPortForwardMentions.length === kubectlMentions.length;
 }
 
-function requireApproval(reason: string): ApprovalDecision {
-	return { allow: false, reason };
+function knownRisk(reason: string): ApprovalDecision {
+	return { allow: false, reason, basis: "knownRisk" };
+}
+
+function unclassified(reason: string): ApprovalDecision {
+	return { allow: false, reason, basis: "unclassified" };
+}
+
+function explicitRule(reason: string): ApprovalDecision {
+	return { allow: false, reason, basis: "explicitRule" };
 }
 
 function allow(): AllowDecision {
@@ -834,7 +874,7 @@ function evaluateRsyncExecutableOptionRisk(invocation: Invocation): PolicyDecisi
 			/\b(?:bash|busybox|dash|eval|exec|fish|node|perl|python|python3|ruby|sh|toybox|zsh)\b/.test(executableValue) ||
 			RSYNC_DELEGATED_GUARDED_PATTERN.test(normalizeForInfraScan(executableValue).toLowerCase())
 		) {
-			return requireApproval("rsync executable option can run behavior hidden from command policy");
+			return knownRisk("rsync executable option can run behavior hidden from command policy");
 		}
 	}
 	return undefined;
@@ -842,11 +882,11 @@ function evaluateRsyncExecutableOptionRisk(invocation: Invocation): PolicyDecisi
 
 function evaluateAlwaysDestructive(executable: "rmdir" | "shred" | "truncate" | "unlink", invocation: Invocation): PolicyDecision {
 	if (invocation.args.length === 1 && HELP_OR_VERSION_ARGUMENTS.has(invocation.args[0])) return allow();
-	return requireApproval(`${executable} command needs confirmation`);
+	return knownRisk(`${executable} command needs confirmation`);
 }
 
 function evaluateFind(invocation: Invocation): PolicyDecision {
-	if (invocation.args.includes("-delete")) return requireApproval("find -delete command needs confirmation");
+	if (invocation.args.includes("-delete")) return knownRisk("find -delete command needs confirmation");
 	return allow();
 }
 
@@ -855,7 +895,7 @@ function evaluateRsync(invocation: Invocation): PolicyDecision {
 	if (executableOptionRisk) return executableOptionRisk;
 	const { destructive, dryRun } = analyzeRsyncOptions(invocation.args);
 	if (dryRun) return allow();
-	if (destructive) return requireApproval(`rsync ${destructive} command needs confirmation`);
+	if (destructive) return knownRisk(`rsync ${destructive} command needs confirmation`);
 	return allow();
 }
 
@@ -1018,19 +1058,29 @@ function isReadOnlyDockerCommand(topLevel: string, nested: string, composeAction
 	return false;
 }
 
-function dockerComposeApprovalReason(args: readonly string[]): { reason?: string; action?: string; dryRun?: boolean } {
+function dockerComposeApprovalDecision(args: readonly string[]): {
+	decision?: ApprovalDecision;
+	action?: string;
+	dryRun?: boolean;
+} {
 	const parsed = parseLeadingCommand(args, COMPOSE_GLOBAL_OPTIONS);
-	if ("error" in parsed) return { reason: `docker compose uses an unsupported flag layout (${parsed.error})` };
+	if ("error" in parsed) {
+		return { decision: unclassified(`docker compose uses an unsupported flag layout (${parsed.error})`) };
+	}
 	const action = (parsed.command || "").toLowerCase();
 	const dryRun = parsed.leading.some((word) => optionName(word) === "--dry-run");
 	if (!action || action === "help" || parsed.leading.some((word) => optionName(word) === "--help")) return { action, dryRun };
 	if (action === "exec" || action === "run") {
-		return { action, dryRun, reason: `docker compose ${action} runs an arbitrary command in a container` };
+		return { action, dryRun, decision: knownRisk(`docker compose ${action} runs an arbitrary command in a container`) };
 	}
 	const hostRisk = dockerHostControlRisk(parsed.tail);
-	if (hostRisk) return { action, dryRun, reason: `docker compose ${action} ${hostRisk}` };
+	if (hostRisk) return { action, dryRun, decision: knownRisk(`docker compose ${action} ${hostRisk}`) };
 	if (action === "rm") {
-		return { action, dryRun, reason: dryRun ? undefined : "docker compose rm removes service containers" };
+		return {
+			action,
+			dryRun,
+			...(dryRun ? {} : { decision: knownRisk("docker compose rm removes service containers") }),
+		};
 	}
 	if (
 		action === "down" &&
@@ -1041,64 +1091,71 @@ function dockerComposeApprovalReason(args: readonly string[]): { reason?: string
 			hasEnabledBooleanOption(parsed.tail, "--remove-orphans")
 		)
 	) {
-		return { action, dryRun, reason: dryRun ? undefined : "docker compose down can remove volumes, images, or orphaned containers" };
+		return {
+			action,
+			dryRun,
+			...(dryRun ? {} : { decision: knownRisk("docker compose down can remove volumes, images, or orphaned containers") }),
+		};
 	}
-	if (action === "push" || action === "publish") return { action, dryRun, reason: `docker compose ${action} writes to a registry` };
-	if (hasOption(parsed.tail, "--push")) return { action, dryRun, reason: `docker compose ${action} --push writes build output to a registry` };
+	if (action === "push" || action === "publish") {
+		return { action, dryRun, decision: knownRisk(`docker compose ${action} writes to a registry`) };
+	}
+	if (hasOption(parsed.tail, "--push")) {
+		return { action, dryRun, decision: knownRisk(`docker compose ${action} --push writes build output to a registry`) };
+	}
 	return { action, dryRun };
 }
 
-function dockerApprovalReason(args: readonly string[]): string | undefined {
+function dockerApprovalDecision(args: readonly string[]): ApprovalDecision | undefined {
 	const parsed = parseLeadingCommand(args, DOCKER_GLOBAL_OPTIONS);
-	if ("error" in parsed) return `docker uses an unsupported flag layout (${parsed.error})`;
+	if ("error" in parsed) return unclassified(`docker uses an unsupported flag layout (${parsed.error})`);
 	const topLevel = (parsed.command || "").toLowerCase();
 	if (!topLevel || topLevel === "help" || parsed.leading.some((word) => optionName(word) === "--help")) return undefined;
 	const nested = nestedDockerAction(parsed.tail);
 	let composeAction: string | undefined;
 	let composeDryRun = false;
 	if (topLevel === "compose") {
-		const compose = dockerComposeApprovalReason(parsed.tail);
-		if (compose.reason) return compose.reason;
+		const compose = dockerComposeApprovalDecision(parsed.tail);
+		if (compose.decision) return compose.decision;
 		composeAction = compose.action;
 		composeDryRun = compose.dryRun === true;
 	}
 
-	if (topLevel === "rm" || topLevel === "rmi") return `docker ${topLevel} removes container data`;
+	if (topLevel === "rm" || topLevel === "rmi") return knownRisk(`docker ${topLevel} removes container data`);
 	if (DOCKER_RESOURCE_REMOVAL_ACTIONS[topLevel]?.has(nested)) {
-		return `docker ${topLevel} ${nested} removes Docker resources or data`;
+		return knownRisk(`docker ${topLevel} ${nested} removes Docker resources or data`);
 	}
 	if (topLevel === "exec" || topLevel === "debug" || (topLevel === "container" && nested === "exec")) {
-		return `docker ${topLevel === "container" ? "container exec" : topLevel} runs an arbitrary command in a container`;
+		return knownRisk(`docker ${topLevel === "container" ? "container exec" : topLevel} runs an arbitrary command in a container`);
 	}
 
 	const hostRisk = dockerHostControlRisk(parsed.tail);
-	if (hostRisk) return `docker ${topLevel} ${hostRisk}`;
+	if (hostRisk) return knownRisk(`docker ${topLevel} ${hostRisk}`);
 
-	if (topLevel === "swarm") return `docker swarm ${nested || "<unknown>"} changes or exposes swarm control-plane state`;
+	if (topLevel === "swarm") return knownRisk(`docker swarm ${nested || "<unknown>"} changes or exposes swarm control-plane state`);
 	if (DOCKER_CONTROL_PLANE_READS[topLevel] && nested && nested !== "help" && !DOCKER_CONTROL_PLANE_READS[topLevel].has(nested)) {
-		return `docker ${topLevel} ${nested} changes Docker control-plane state`;
+		return knownRisk(`docker ${topLevel} ${nested} changes Docker control-plane state`);
 	}
-	if (topLevel === "login" || topLevel === "logout") return `docker ${topLevel} changes stored registry credentials`;
+	if (topLevel === "login" || topLevel === "logout") return knownRisk(`docker ${topLevel} changes stored registry credentials`);
 	if (topLevel === "push" || (topLevel === "image" && nested === "push") || (topLevel === "manifest" && nested === "push")) {
-		return `docker ${topLevel}${nested ? ` ${nested}` : ""} writes to a registry`;
+		return knownRisk(`docker ${topLevel}${nested ? ` ${nested}` : ""} writes to a registry`);
 	}
 	if (topLevel === "buildx" && nested === "imagetools" && parsed.tail[1]?.toLowerCase() === "create") {
-		return "docker buildx imagetools create writes image metadata to a registry";
+		return knownRisk("docker buildx imagetools create writes image metadata to a registry");
 	}
 	if (
 		(topLevel === "build" || topLevel === "builder" || topLevel === "buildx") &&
 		hasOption(parsed.tail, "--push")
-	) return `docker ${topLevel} --push writes build output to a registry`;
+	) return knownRisk(`docker ${topLevel} --push writes build output to a registry`);
 
 	if (dockerUsesExplicitEndpoint(parsed.leading) && !isReadOnlyDockerCommand(topLevel, nested, composeAction, composeDryRun)) {
-		return `docker ${topLevel}${composeAction ? ` ${composeAction}` : ""} mutates an explicitly selected daemon`;
+		return knownRisk(`docker ${topLevel}${composeAction ? ` ${composeAction}` : ""} mutates an explicitly selected daemon`);
 	}
 	return undefined;
 }
 
 function evaluateDocker(invocation: Invocation): PolicyDecision {
-	const reason = dockerApprovalReason(invocation.args);
-	return reason ? requireApproval(reason) : allow();
+	return dockerApprovalDecision(invocation.args) ?? allow();
 }
 
 const GIT_PUSH_VALUE_OPTIONS = new Set([
@@ -1256,74 +1313,76 @@ function gitPushApprovalReason(args: readonly string[]): string | undefined {
 	return destructiveRefspec ? `git push refspec ${destructiveRefspec} can rewrite or delete remote refs` : undefined;
 }
 
-function gitApprovalReason(args: readonly string[]): string | undefined {
-	if (gitInlineAliasRisk(args)) return "git invocation-local aliases can hide behavior from command policy";
+function gitApprovalDecision(args: readonly string[]): ApprovalDecision | undefined {
+	if (gitInlineAliasRisk(args)) return knownRisk("git invocation-local aliases can hide behavior from command policy");
 	const parsed = parseLeadingCommand(args, GIT_GLOBAL_OPTIONS);
-	if ("error" in parsed) return `git uses an unsupported global flag layout (${parsed.error})`;
+	if ("error" in parsed) return unclassified(`git uses an unsupported global flag layout (${parsed.error})`);
 	const command = (parsed.command || "").toLowerCase();
 	if (!command || command === "help" || hasGitHelpOption(parsed.tail)) return undefined;
 
 	if (command === "clean") {
 		if (gitCleanDryRun(parsed.tail)) return undefined;
-		return "git clean can permanently delete untracked files";
+		return knownRisk("git clean can permanently delete untracked files");
 	}
 	if (command === "reset" && hasOption(parsed.tail, "--hard")) {
-		return "git reset --hard can discard working-tree and index changes";
+		return knownRisk("git reset --hard can discard working-tree and index changes");
 	}
 	if (command === "restore") {
 		const staged = hasEnabledBooleanOption(parsed.tail, "--staged") || hasGitShortFlag(parsed.tail, "S", "SWqp");
 		const worktree = hasEnabledBooleanOption(parsed.tail, "--worktree") || hasGitShortFlag(parsed.tail, "W", "SWqp");
-		if (!staged || worktree) return "git restore writes tracked content into the working tree";
+		if (!staged || worktree) return knownRisk("git restore writes tracked content into the working tree");
 	}
 	if (command === "checkout") {
 		if (hasEnabledBooleanOption(parsed.tail, "--force") || hasGitShortFlag(parsed.tail, "f", "qf")) {
-			return "git checkout --force can discard working-tree changes";
+			return knownRisk("git checkout --force can discard working-tree changes");
 		}
 		const delimiter = parsed.tail.indexOf("--");
 		if (delimiter !== -1 && delimiter + 1 < parsed.tail.length) {
-			return "git checkout path mode overwrites working-tree files";
+			return knownRisk("git checkout path mode overwrites working-tree files");
 		}
 	}
 	if (
 		command === "switch" &&
 		(hasEnabledBooleanOption(parsed.tail, "--force") || hasEnabledBooleanOption(parsed.tail, "--discard-changes") || hasGitShortFlag(parsed.tail, "f", "qf"))
-	) return "git switch discard/force mode can discard working-tree changes";
+	) return knownRisk("git switch discard/force mode can discard working-tree changes");
 	if (command === "branch") {
 		const forcedDelete = hasGitShortFlag(parsed.tail, "D", "dDf") ||
 			((hasEnabledBooleanOption(parsed.tail, "--delete") || hasGitShortFlag(parsed.tail, "d", "dDf")) &&
 				(hasEnabledBooleanOption(parsed.tail, "--force") || hasGitShortFlag(parsed.tail, "f", "dDf")));
-		if (forcedDelete) return "git branch force-delete can discard an unmerged branch ref";
+		if (forcedDelete) return knownRisk("git branch force-delete can discard an unmerged branch ref");
 	}
 	if (command === "tag" && (hasEnabledBooleanOption(parsed.tail, "--delete") || hasGitShortFlag(parsed.tail, "d", "dnsv"))) {
-		return "git tag deletion removes a local tag ref";
+		return knownRisk("git tag deletion removes a local tag ref");
 	}
 	if (command === "stash") {
 		const action = firstPositionalBeforeDelimiter(parsed.tail);
-		if (action === "drop" || action === "clear") return `git stash ${action} removes saved work`;
+		if (action === "drop" || action === "clear") return knownRisk(`git stash ${action} removes saved work`);
 	}
 	if (command === "reflog") {
 		const action = firstPositionalBeforeDelimiter(parsed.tail);
-		if (action === "delete" || action === "expire") return `git reflog ${action} removes recovery history`;
+		if (action === "delete" || action === "expire") return knownRisk(`git reflog ${action} removes recovery history`);
 	}
 	if (
 		command === "worktree" && firstPositionalBeforeDelimiter(parsed.tail) === "remove" &&
 		(hasEnabledBooleanOption(parsed.tail, "--force") || hasGitShortFlag(parsed.tail, "f", "f"))
-	) return "git worktree remove --force can delete a dirty worktree";
+	) return knownRisk("git worktree remove --force can delete a dirty worktree");
 	if (
 		command === "gc" &&
 		parsed.tail.some((word, index) => word === "--prune=now" || (word === "--prune" && parsed.tail[index + 1] === "now"))
-	) return "git gc --prune=now can permanently remove unreachable objects";
+	) return knownRisk("git gc --prune=now can permanently remove unreachable objects");
 	if (command === "prune") {
 		if (gitPruneDryRun(parsed.tail)) return undefined;
-		return "git prune can permanently remove unreachable objects";
+		return knownRisk("git prune can permanently remove unreachable objects");
 	}
-	if (command === "push") return gitPushApprovalReason(parsed.tail);
+	if (command === "push") {
+		const reason = gitPushApprovalReason(parsed.tail);
+		return reason ? knownRisk(reason) : undefined;
+	}
 	return undefined;
 }
 
 function evaluateGit(invocation: Invocation): PolicyDecision {
-	const reason = gitApprovalReason(invocation.args);
-	return reason ? requireApproval(reason) : allow();
+	return gitApprovalDecision(invocation.args) ?? allow();
 }
 
 function hasVaultHelpOption(args: readonly string[]): boolean {
@@ -1331,9 +1390,9 @@ function hasVaultHelpOption(args: readonly string[]): boolean {
 	return isHelp(args[0]) || (!!args[0] && !args[0].startsWith("-") && isHelp(args[1]));
 }
 
-function vaultApprovalReason(args: readonly string[]): string | undefined {
+function vaultApprovalDecision(args: readonly string[]): ApprovalDecision | undefined {
 	const parsed = parseLeadingCommand(args, VAULT_GLOBAL_OPTIONS);
-	if ("error" in parsed) return `vault uses an unsupported global flag layout (${parsed.error})`;
+	if ("error" in parsed) return unclassified(`vault uses an unsupported global flag layout (${parsed.error})`);
 	const command = (parsed.command || "").toLowerCase();
 	if (!command || command === "help" || command === "version" || command === "status" || hasVaultHelpOption(parsed.tail)) {
 		return undefined;
@@ -1342,20 +1401,21 @@ function vaultApprovalReason(args: readonly string[]): string | undefined {
 	if (
 		command === "read" || command === "list" || command === "unwrap" ||
 		(command === "kv" && (nested === "get" || nested === "list"))
-	) return `vault ${command}${nested ? ` ${nested}` : ""} may expose secret material`;
+	) return knownRisk(`vault ${command}${nested ? ` ${nested}` : ""} may expose secret material`);
 	if (command === "write" || command === "delete" || command === "kv") {
-		return `vault ${command}${nested ? ` ${nested}` : ""} changes Vault data or configuration`;
+		return knownRisk(`vault ${command}${nested ? ` ${nested}` : ""} changes Vault data or configuration`);
 	}
 	if (["auth", "login", "operator", "policy", "secrets", "token"].includes(command)) {
-		return `vault ${command}${nested ? ` ${nested}` : ""} accesses or changes security-critical Vault state`;
+		return knownRisk(`vault ${command}${nested ? ` ${nested}` : ""} accesses or changes security-critical Vault state`);
 	}
-	if (command === "agent" || command === "server") return `vault ${command} starts a long-running secret-handling process`;
-	return `vault ${command} is not on the low-risk allowlist`;
+	if (command === "agent" || command === "server") {
+		return knownRisk(`vault ${command} starts a long-running secret-handling process`);
+	}
+	return unclassified(`vault ${command} is not on the low-risk allowlist`);
 }
 
 function evaluateVault(invocation: Invocation): PolicyDecision {
-	const reason = vaultApprovalReason(invocation.args);
-	return reason ? requireApproval(reason) : allow();
+	return vaultApprovalDecision(invocation.args) ?? allow();
 }
 
 function isSensitiveAwsRead(service: string, operation: string): boolean {
@@ -1388,21 +1448,24 @@ function evaluateAws(invocation: Invocation): PolicyDecision {
 		leadingBooleanOptions: AWS_LEADING_BOOLEAN_OPTIONS,
 		leadingValueOptions: AWS_LEADING_VALUE_OPTIONS,
 	});
-	if ("error" in collected) return requireApproval(`aws uses an unsupported flag layout (${collected.error})`);
+	if ("error" in collected) return unclassified(`aws uses an unsupported flag layout (${collected.error})`);
 
 	const service = (collected.positionals[0] || "").toLowerCase();
 	const operation = (collected.positionals[1] || "").toLowerCase();
 	if (!service) {
 		if (hasOption(invocation.args, "--version")) return allow();
-		return requireApproval("aws command could not be classified safely");
+		return unclassified("aws command could not be classified safely");
 	}
 	if (service === "help") return allow();
-	if (!operation) return requireApproval(`aws ${service} command could not be classified safely`);
+	if (!operation) return unclassified(`aws ${service} command could not be classified safely`);
 	if (isSensitiveAwsRead(service, operation)) {
-		return requireApproval(`aws ${service} ${operation} may expose credentials or secret material`);
+		return knownRisk(`aws ${service} ${operation} may expose credentials or secret material`);
 	}
 	if (isSafeAwsOperation(service, operation)) return allow();
-	return requireApproval(`aws ${service} ${operation} is not on the low-risk allowlist`);
+	if (actionStartsWith(operation, CLOUD_MUTATION_ACTIONS)) {
+		return knownRisk(`aws ${service} ${operation} is not on the low-risk allowlist`);
+	}
+	return unclassified(`aws ${service} ${operation} is not on the low-risk allowlist`);
 }
 
 function isSensitiveAzRead(path: string[], action: string): boolean {
@@ -1422,12 +1485,12 @@ function evaluateAz(invocation: Invocation): PolicyDecision {
 		leadingBooleanOptions: AZ_LEADING_BOOLEAN_OPTIONS,
 		leadingValueOptions: AZ_LEADING_VALUE_OPTIONS,
 	});
-	if ("error" in collected) return requireApproval(`az uses an unsupported flag layout (${collected.error})`);
+	if ("error" in collected) return unclassified(`az uses an unsupported flag layout (${collected.error})`);
 
 	const path = collected.positionals.map((word) => word.toLowerCase());
 	if (path.length === 0) {
 		if (hasOption(invocation.args, "--help") || hasOption(invocation.args, "-h")) return allow();
-		return requireApproval("az command could not be classified safely");
+		return unclassified("az command could not be classified safely");
 	}
 	if (path[0] === "help" || path[0] === "version") return allow();
 
@@ -1437,10 +1500,10 @@ function evaluateAz(invocation: Invocation): PolicyDecision {
 		AZ_MUTATION_NAMED_GROUP_PATHS,
 		AZ_SAFE_NAMED_GROUP_PATHS,
 	);
-	if (!classified) return requireApproval(`az ${path.join(" ")} is not on the low-risk allowlist`);
-	if (!classified.safe) return requireApproval(`az ${classified.action} may change Azure or local CLI state`);
+	if (!classified) return unclassified(`az ${path.join(" ")} is not on the low-risk allowlist`);
+	if (!classified.safe) return knownRisk(`az ${classified.action} may change Azure or local CLI state`);
 	if (isSensitiveAzRead(path, classified.action)) {
-		return requireApproval(`az ${classified.action} may expose credentials or secret material`);
+		return knownRisk(`az ${classified.action} may expose credentials or secret material`);
 	}
 	return allow();
 }
@@ -1454,7 +1517,7 @@ function isSensitiveGcloudRead(path: string[], action: string): boolean {
 
 function evaluateGcloud(invocation: Invocation): PolicyDecision {
 	if (hasOption(invocation.args, "--flags-file")) {
-		return requireApproval("gcloud --flags-file can hide behavior from lexical classification");
+		return unclassified("gcloud --flags-file can hide behavior from lexical classification");
 	}
 
 	const collected = collectPositionals(invocation.args, {
@@ -1462,19 +1525,22 @@ function evaluateGcloud(invocation: Invocation): PolicyDecision {
 		leadingBooleanOptions: GCLOUD_LEADING_BOOLEAN_OPTIONS,
 		leadingValueOptions: GCLOUD_LEADING_VALUE_OPTIONS,
 	});
-	if ("error" in collected) return requireApproval(`gcloud uses an unsupported flag layout (${collected.error})`);
+	if ("error" in collected) return unclassified(`gcloud uses an unsupported flag layout (${collected.error})`);
 
 	const path = collected.positionals.map((word) => word.toLowerCase());
 	if (path.length === 0) {
 		if (hasOption(invocation.args, "--help") || hasOption(invocation.args, "-h") || hasOption(invocation.args, "--version")) {
 			return allow();
 		}
-		return requireApproval("gcloud command could not be classified safely");
+		return unclassified("gcloud command could not be classified safely");
 	}
 	if (SAFE_GCLOUD_META_COMMANDS.has(path[0])) return allow();
 	if (path[0] === "policy-troubleshoot" && path[1] === "iam") return allow();
 	if (path[0] === "alpha" || path[0] === "beta") {
-		return requireApproval(`gcloud ${path[0]} commands are not on the stable low-risk allowlist`);
+		return unclassified(`gcloud ${path[0]} commands are not on the stable low-risk allowlist`);
+	}
+	if (path[0] === "secrets") {
+		return knownRisk(`gcloud ${path.at(-1) || "<unknown>"} may expose credentials or secret material`);
 	}
 
 	const classified = findCloudAction(
@@ -1483,17 +1549,17 @@ function evaluateGcloud(invocation: Invocation): PolicyDecision {
 		GCLOUD_MUTATION_NAMED_GROUP_PATHS,
 		GCLOUD_SAFE_NAMED_GROUP_PATHS,
 	);
-	if (!classified) return requireApproval(`gcloud ${path.join(" ")} is not on the low-risk allowlist`);
-	if (!classified.safe) return requireApproval(`gcloud ${classified.action} may change Google Cloud or local CLI state`);
+	if (!classified) return unclassified(`gcloud ${path.join(" ")} is not on the low-risk allowlist`);
+	if (!classified.safe) return knownRisk(`gcloud ${classified.action} may change Google Cloud or local CLI state`);
 	if (isSensitiveGcloudRead(path, classified.action)) {
-		return requireApproval(`gcloud ${classified.action} may expose credentials or secret material`);
+		return knownRisk(`gcloud ${classified.action} may expose credentials or secret material`);
 	}
 	return allow();
 }
 
 function evaluateKubectl(invocation: Invocation): PolicyDecision {
 	if (hasRawKubectlFlag(invocation.args)) {
-		return requireApproval("kubectl --raw is not on the low-risk allowlist");
+		return knownRisk("kubectl --raw is not on the low-risk allowlist");
 	}
 
 	const collected = collectPositionals(invocation.args, {
@@ -1502,7 +1568,7 @@ function evaluateKubectl(invocation: Invocation): PolicyDecision {
 		leadingValueOptions: KUBECTL_LEADING_VALUE_OPTIONS,
 	});
 	if ("error" in collected) {
-		return requireApproval(`kubectl uses an unsupported flag layout (${collected.error})`);
+		return unclassified(`kubectl uses an unsupported flag layout (${collected.error})`);
 	}
 
 	const positionals = collected.positionals;
@@ -1511,33 +1577,38 @@ function evaluateKubectl(invocation: Invocation): PolicyDecision {
 	const target = positionals[1] || "";
 
 	if (!topLevel) {
-		return requireApproval("kubectl command could not be classified safely");
+		return unclassified("kubectl command could not be classified safely");
 	}
 
 	if (topLevel === "get" || topLevel === "describe") {
 		if (isSecretLikeKubectlTarget(target)) {
-			return requireApproval(`kubectl ${topLevel} against secrets may expose secret material`);
+			return knownRisk(`kubectl ${topLevel} against secrets may expose secret material`);
 		}
 		return allow();
 	}
 
 	if (topLevel === "auth") {
 		if (SAFE_KUBECTL_NESTED.auth.has(nested)) return allow();
-		return requireApproval(`kubectl auth ${nested || "<unknown>"} is not on the low-risk allowlist`);
+		return unclassified(`kubectl auth ${nested || "<unknown>"} is not on the low-risk allowlist`);
 	}
 
 	if (topLevel === "rollout") {
 		if (SAFE_KUBECTL_NESTED.rollout.has(nested)) return allow();
-		return requireApproval(`kubectl rollout ${nested || "<unknown>"} may change workload state`);
+		if (RISKY_KUBECTL_ROLLOUT_ACTIONS.has(nested)) {
+			return knownRisk(`kubectl rollout ${nested} may change workload state`);
+		}
+		return unclassified(`kubectl rollout ${nested || "<unknown>"} is not on the low-risk allowlist`);
 	}
 
 	if (topLevel === "cluster-info" && nested === "dump") {
-		return requireApproval("kubectl cluster-info dump can expose sensitive cluster state");
+		return knownRisk("kubectl cluster-info dump can expose sensitive cluster state");
 	}
 
 	if (SAFE_KUBECTL_TOP_LEVEL.has(topLevel)) return allow();
-
-	return requireApproval(`kubectl ${topLevel} is not on the low-risk allowlist`);
+	if (RISKY_KUBECTL_TOP_LEVEL.has(topLevel)) {
+		return knownRisk(`kubectl ${topLevel} is not on the low-risk allowlist`);
+	}
+	return unclassified(`kubectl ${topLevel} is not on the low-risk allowlist`);
 }
 
 function evaluateTerraform(invocation: Invocation): PolicyDecision {
@@ -1547,7 +1618,7 @@ function evaluateTerraform(invocation: Invocation): PolicyDecision {
 		leadingValueOptions: TERRAFORM_LEADING_VALUE_OPTIONS,
 	});
 	if ("error" in collected) {
-		return requireApproval(`terraform uses an unsupported flag layout (${collected.error})`);
+		return unclassified(`terraform uses an unsupported flag layout (${collected.error})`);
 	}
 
 	const positionals = collected.positionals;
@@ -1556,31 +1627,39 @@ function evaluateTerraform(invocation: Invocation): PolicyDecision {
 
 	if (!topLevel) {
 		if (invocation.args.some((arg) => arg === "-version" || arg === "--version")) return allow();
-		return requireApproval("terraform command could not be classified safely");
+		return unclassified("terraform command could not be classified safely");
 	}
 
 	if (topLevel === "state") {
 		if (SAFE_TERRAFORM_NESTED.state.has(nested)) return allow();
-		return requireApproval(`terraform state ${nested || "<unknown>"} can mutate or rewrite state`);
+		if (RISKY_TERRAFORM_NESTED.state.has(nested)) {
+			return knownRisk(`terraform state ${nested} can mutate or rewrite state`);
+		}
+		return unclassified(`terraform state ${nested || "<unknown>"} is not on the low-risk allowlist`);
 	}
 
 	if (topLevel === "workspace") {
 		if (SAFE_TERRAFORM_NESTED.workspace.has(nested)) return allow();
-		return requireApproval(`terraform workspace ${nested || "<unknown>"} is not on the low-risk allowlist`);
+		if (RISKY_TERRAFORM_NESTED.workspace.has(nested)) {
+			return knownRisk(`terraform workspace ${nested} is not on the low-risk allowlist`);
+		}
+		return unclassified(`terraform workspace ${nested || "<unknown>"} is not on the low-risk allowlist`);
 	}
 
 	if (topLevel === "output") {
-		return requireApproval("terraform output may expose sensitive values");
+		return knownRisk("terraform output may expose sensitive values");
 	}
 
 	if (SAFE_TERRAFORM_TOP_LEVEL.has(topLevel)) return allow();
-
-	return requireApproval(`terraform ${topLevel} is not on the low-risk allowlist`);
+	if (RISKY_TERRAFORM_TOP_LEVEL.has(topLevel)) {
+		return knownRisk(`terraform ${topLevel} is not on the low-risk allowlist`);
+	}
+	return unclassified(`terraform ${topLevel} is not on the low-risk allowlist`);
 }
 
 function evaluateHelm(invocation: Invocation): PolicyDecision {
 	if (invocation.args.some((arg) => arg === "--post-renderer" || arg.startsWith("--post-renderer="))) {
-		return requireApproval("helm --post-renderer can execute an external program");
+		return knownRisk("helm --post-renderer can execute an external program");
 	}
 
 	const collected = collectPositionals(invocation.args, {
@@ -1589,28 +1668,35 @@ function evaluateHelm(invocation: Invocation): PolicyDecision {
 		leadingValueOptions: HELM_LEADING_VALUE_OPTIONS,
 	});
 	if ("error" in collected) {
-		return requireApproval(`helm uses an unsupported flag layout (${collected.error})`);
+		return unclassified(`helm uses an unsupported flag layout (${collected.error})`);
 	}
 
 	const topLevel = (collected.positionals[0] || "").toLowerCase();
 	const nested = (collected.positionals[1] || "").toLowerCase();
 	if (!topLevel) {
 		if (invocation.args.some((arg) => arg === "-h" || arg === "--help")) return allow();
-		return requireApproval("helm command could not be classified safely");
+		return unclassified("helm command could not be classified safely");
 	}
 
 	if (topLevel === "get") {
-		return requireApproval("helm get may expose stored release values or rendered secrets");
+		return knownRisk("helm get may expose stored release values or rendered secrets");
 	}
 
 	const nestedAllowlist = SAFE_HELM_NESTED[topLevel as keyof typeof SAFE_HELM_NESTED];
 	if (nestedAllowlist) {
 		if (nestedAllowlist.has(nested)) return allow();
-		return requireApproval(`helm ${topLevel} ${nested || "<unknown>"} is not on the low-risk allowlist`);
+		if (RISKY_HELM_NESTED[topLevel]?.has(nested)) {
+			return knownRisk(`helm ${topLevel} ${nested} changes Helm or repository state`);
+		}
+		return unclassified(`helm ${topLevel} ${nested || "<unknown>"} is not on the low-risk allowlist`);
 	}
 
 	if (SAFE_HELM_TOP_LEVEL.has(topLevel)) return allow();
-	return requireApproval(`helm ${topLevel} is not on the low-risk allowlist`);
+	if (RISKY_HELM_NESTED[topLevel]?.has(nested)) {
+		return knownRisk(`helm ${topLevel} ${nested} changes Helm or registry state`);
+	}
+	if (RISKY_HELM_TOP_LEVEL.has(topLevel)) return knownRisk(`helm ${topLevel} changes release or registry state`);
+	return unclassified(`helm ${topLevel} is not on the low-risk allowlist`);
 }
 
 function evaluateArgocd(invocation: Invocation): PolicyDecision {
@@ -1620,7 +1706,7 @@ function evaluateArgocd(invocation: Invocation): PolicyDecision {
 		leadingValueOptions: ARGOCD_LEADING_VALUE_OPTIONS,
 	});
 	if ("error" in collected) {
-		return requireApproval(`argocd uses an unsupported flag layout (${collected.error})`);
+		return unclassified(`argocd uses an unsupported flag layout (${collected.error})`);
 	}
 
 	const topLevel = (collected.positionals[0] || "").toLowerCase();
@@ -1628,30 +1714,40 @@ function evaluateArgocd(invocation: Invocation): PolicyDecision {
 	const action = (collected.positionals[2] || "").toLowerCase();
 	if (!topLevel) {
 		if (invocation.args.some((arg) => arg === "-h" || arg === "--help" || arg === "--version")) return allow();
-		return requireApproval("argocd command could not be classified safely");
+		return unclassified("argocd command could not be classified safely");
 	}
 
 	if (topLevel === "app" && (nested === "diff" || nested === "manifests")) {
-		return requireApproval(`argocd app ${nested} may expose rendered secret material`);
+		return knownRisk(`argocd app ${nested} may expose rendered secret material`);
 	}
 	if (topLevel === "app" && nested === "actions") {
 		if (action === "list") return allow();
-		return requireApproval(`argocd app actions ${action || "<unknown>"} may execute a resource action`);
+		if (action === "run") return knownRisk("argocd app actions run may execute a resource action");
+		return unclassified(`argocd app actions ${action || "<unknown>"} is not on the low-risk allowlist`);
 	}
 
 	const nestedAllowlist = SAFE_ARGOCD_NESTED[topLevel as keyof typeof SAFE_ARGOCD_NESTED];
 	if (nestedAllowlist) {
 		if (nestedAllowlist.has(nested)) return allow();
-		return requireApproval(`argocd ${topLevel} ${nested || "<unknown>"} is not on the low-risk allowlist`);
+		if (RISKY_ARGOCD_NESTED[topLevel]?.has(nested)) {
+			return knownRisk(`argocd ${topLevel} ${nested} changes Argo CD state or credentials`);
+		}
+		return unclassified(`argocd ${topLevel} ${nested || "<unknown>"} is not on the low-risk allowlist`);
 	}
 
 	if (SAFE_ARGOCD_TOP_LEVEL.has(topLevel)) return allow();
-	return requireApproval(`argocd ${topLevel} is not on the low-risk allowlist`);
+	if (RISKY_ARGOCD_NESTED[topLevel]?.has(nested)) {
+		return knownRisk(`argocd ${topLevel} ${nested} changes Argo CD state or credentials`);
+	}
+	if (RISKY_ARGOCD_TOP_LEVEL.has(topLevel)) return knownRisk(`argocd ${topLevel} changes authentication state`);
+	return unclassified(`argocd ${topLevel} is not on the low-risk allowlist`);
 }
 
 export {
-	requireApproval,
 	allow,
+	explicitRule,
+	knownRisk,
+	unclassified,
 	isKubectlPortForwardOnlyCommand,
 	evaluateKubectl,
 	evaluateTerraform,
@@ -1670,4 +1766,4 @@ export {
 	normalizeOverrideArguments,
 	rsyncExecutableOptionValues,
 };
-export type { AllowDecision, ApprovalDecision, PolicyDecision, ToolEvaluator };
+export type { AllowDecision, ApprovalBasis, ApprovalDecision, PolicyDecision, ToolEvaluator };

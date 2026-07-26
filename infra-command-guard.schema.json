@@ -8,6 +8,11 @@
     "$schema": {
       "type": "string"
     },
+    "guardUnclassifiedCommands": {
+      "type": "boolean",
+      "default": true,
+      "description": "Guard commands that cannot be classified. Setting this to false deliberately allows uncertainty-only commands and can miss dangerous behavior hidden by unsupported syntax, variables, opaque runners, unknown operations, or unread inputs."
+    },
     "guards": {
       "type": "object",
       "description": "Per-command guard overrides. Every guard defaults to enabled when omitted.",

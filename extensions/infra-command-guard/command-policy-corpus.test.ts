@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { DEFAULT_COMMAND_POLICY_SETTINGS } from "./guarded-executables.ts";
 import { evaluateCommand } from "./policy.ts";
 import { test } from "./test-harness.ts";
+
+const RELAXED_POLICY_SETTINGS = { ...DEFAULT_COMMAND_POLICY_SETTINGS, guardUnclassifiedCommands: false };
 
 const DOCKER_ALLOWED = [
 	"docker",
@@ -117,8 +120,8 @@ const DOCKER_APPROVALS = [
 	"docker -Htcp://daemon.example:2375 stop api",
 	"docker --context production compose up -d",
 	"docker -cproduction restart api",
-	"docker --future-global-option run nginx:latest",
 ];
+const DOCKER_UNCLASSIFIED = ["docker --future-global-option run nginx:latest"];
 
 const GIT_ALLOWED = [
 	"git",
@@ -196,10 +199,10 @@ const GIT_APPROVALS = [
 	"git branch --delete --force feature",
 	"git tag -d release-1",
 	"git tag --delete release-1",
-	"git stash drop stash@{0}",
+	'git stash drop "stash@{0}"',
 	"git stash clear",
 	"git reflog expire --expire=now --all",
-	"git reflog delete HEAD@{1}",
+	'git reflog delete "HEAD@{1}"',
 	"git worktree remove --force ../dirty-tree",
 	"git worktree remove -f ../dirty-tree",
 	"git gc --prune=now",
@@ -227,6 +230,10 @@ const GIT_APPROVALS = [
 	"git -calias.deploy='!dangerous-command' deploy",
 	"git -c color.ui=false -c alias.deploy='!dangerous-command' deploy",
 	"git --config-env=alias.deploy=DEPLOY_ALIAS deploy",
+];
+const GIT_UNCLASSIFIED = [
+	"git stash drop stash@{0}",
+	"git reflog delete HEAD@{1}",
 	"git --future-global-option status",
 ];
 
@@ -296,6 +303,8 @@ const VAULT_APPROVALS = [
 	"vault operator raft snapshot restore backup.snap",
 	"vault agent -config=agent.hcl",
 	"vault server -config=server.hcl",
+];
+const VAULT_UNCLASSIFIED = [
 	"vault ssh user@host",
 	"vault lease revoke database/creds/app/id",
 	"vault audit enable file file_path=audit.log",
@@ -325,7 +334,7 @@ function variants(executable: "docker" | "git" | "vault", command: string): stri
 	];
 }
 
-test(`Docker policy corpus: ${DOCKER_ALLOWED.length + DOCKER_APPROVALS.length} decisions`, () => {
+test(`Docker policy corpus: ${DOCKER_ALLOWED.length + DOCKER_APPROVALS.length + DOCKER_UNCLASSIFIED.length} decisions`, () => {
 	assert.ok(DOCKER_ALLOWED.length >= 30);
 	assert.ok(DOCKER_APPROVALS.length >= 50);
 	for (const command of DOCKER_ALLOWED) {
@@ -336,11 +345,18 @@ test(`Docker policy corpus: ${DOCKER_ALLOWED.length + DOCKER_APPROVALS.length} d
 	for (const command of DOCKER_APPROVALS) {
 		for (const variant of variants("docker", command)) {
 			assert.equal(evaluateCommand(variant).allow, false, `unexpected allow: ${variant}`);
+			assert.equal(evaluateCommand(variant, RELAXED_POLICY_SETTINGS).allow, false, `relaxed known risk: ${variant}`);
+		}
+	}
+	for (const command of DOCKER_UNCLASSIFIED) {
+		for (const variant of variants("docker", command)) {
+			assert.equal(evaluateCommand(variant).allow, false, `conservative uncertainty: ${variant}`);
+			assert.equal(evaluateCommand(variant, RELAXED_POLICY_SETTINGS).allow, true, `relaxed uncertainty: ${variant}`);
 		}
 	}
 });
 
-test(`Git policy corpus: ${GIT_ALLOWED.length + GIT_APPROVALS.length} decisions`, () => {
+test(`Git policy corpus: ${GIT_ALLOWED.length + GIT_APPROVALS.length + GIT_UNCLASSIFIED.length} decisions`, () => {
 	assert.ok(GIT_ALLOWED.length >= 40);
 	assert.ok(GIT_APPROVALS.length >= 40);
 	for (const command of GIT_ALLOWED) {
@@ -351,11 +367,18 @@ test(`Git policy corpus: ${GIT_ALLOWED.length + GIT_APPROVALS.length} decisions`
 	for (const command of GIT_APPROVALS) {
 		for (const variant of variants("git", command)) {
 			assert.equal(evaluateCommand(variant).allow, false, `unexpected allow: ${variant}`);
+			assert.equal(evaluateCommand(variant, RELAXED_POLICY_SETTINGS).allow, false, `relaxed known risk: ${variant}`);
+		}
+	}
+	for (const command of GIT_UNCLASSIFIED) {
+		for (const variant of variants("git", command)) {
+			assert.equal(evaluateCommand(variant).allow, false, `conservative uncertainty: ${variant}`);
+			assert.equal(evaluateCommand(variant, RELAXED_POLICY_SETTINGS).allow, true, `relaxed uncertainty: ${variant}`);
 		}
 	}
 });
 
-test(`Vault policy corpus: ${VAULT_ALLOWED.length + VAULT_APPROVALS.length} decisions`, () => {
+test(`Vault policy corpus: ${VAULT_ALLOWED.length + VAULT_APPROVALS.length + VAULT_UNCLASSIFIED.length} decisions`, () => {
 	assert.ok(VAULT_ALLOWED.length >= 15);
 	assert.ok(VAULT_APPROVALS.length >= 40);
 	for (const command of VAULT_ALLOWED) {
@@ -366,6 +389,13 @@ test(`Vault policy corpus: ${VAULT_ALLOWED.length + VAULT_APPROVALS.length} deci
 	for (const command of VAULT_APPROVALS) {
 		for (const variant of variants("vault", command)) {
 			assert.equal(evaluateCommand(variant).allow, false, `unexpected allow: ${variant}`);
+			assert.equal(evaluateCommand(variant, RELAXED_POLICY_SETTINGS).allow, false, `relaxed known risk: ${variant}`);
+		}
+	}
+	for (const command of VAULT_UNCLASSIFIED) {
+		for (const variant of variants("vault", command)) {
+			assert.equal(evaluateCommand(variant).allow, false, `conservative uncertainty: ${variant}`);
+			assert.equal(evaluateCommand(variant, RELAXED_POLICY_SETTINGS).allow, true, `relaxed uncertainty: ${variant}`);
 		}
 	}
 });
@@ -373,5 +403,6 @@ test(`Vault policy corpus: ${VAULT_ALLOWED.length + VAULT_APPROVALS.length} deci
 test("standalone docker-compose is conservatively guarded as literal indirect Docker execution", () => {
 	for (const command of ["docker-compose ps", "/usr/local/bin/docker-compose down -v", "sudo -n docker-compose up -d"]) {
 		assert.equal(evaluateCommand(command).allow, false, command);
+		assert.equal(evaluateCommand(command, RELAXED_POLICY_SETTINGS).allow, true, command);
 	}
 });

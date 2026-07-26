@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import {
 	DEFAULT_COMMAND_OVERRIDES,
+	DEFAULT_COMMAND_POLICY_SETTINGS,
 	DEFAULT_GUARD_SETTINGS,
 	type CommandOverrides,
+	type CommandPolicySettings,
 	type GuardedExecutable,
 } from "./guarded-executables.ts";
 import { evaluateCommand } from "./policy.ts";
 import { test } from "./test-harness.ts";
+
+function policyWith(overrides: Partial<CommandPolicySettings>): CommandPolicySettings {
+	return { ...DEFAULT_COMMAND_POLICY_SETTINGS, ...overrides };
+}
 
 test("rm classification covers executable paths and common wrappers", () => {
 	for (const command of [
@@ -90,10 +96,10 @@ test("destructive local file commands require approval without blocking ordinary
 	assert.equal(evaluateCommand(`rsync -e "sh -c 'rm -rf target'" source/ host:destination/`).allow, false);
 	assert.equal(evaluateCommand(`rsync --rs="sh -c 'rm -rf target'" source/ host:destination/`).allow, false);
 	const findDisabled = { ...DEFAULT_GUARD_SETTINGS, find: false };
-	assert.equal(evaluateCommand("find . -exec unlink {} \\;", findDisabled).allow, false);
-	assert.equal(evaluateCommand("find /bin -name rm -exec {} -rf target \\;", findDisabled).allow, false);
+	assert.equal(evaluateCommand("find . -exec unlink {} \\;", policyWith({ guards: findDisabled })).allow, false);
+	assert.equal(evaluateCommand("find /bin -name rm -exec {} -rf target \\;", policyWith({ guards: findDisabled })).allow, false);
 	const rsyncDisabled = { ...DEFAULT_GUARD_SETTINGS, rsync: false };
-	assert.equal(evaluateCommand(`rsync -e "sh -c 'rm -rf target'" source/ host:destination/`, rsyncDisabled).allow, false);
+	assert.equal(evaluateCommand(`rsync -e "sh -c 'rm -rf target'" source/ host:destination/`, policyWith({ guards: rsyncDisabled })).allow, false);
 });
 
 test("kubectl and terraform retain their safe and approval-required behavior", () => {
@@ -380,6 +386,84 @@ test("guarded commands fail closed through shell composition and obfuscation", (
 	}
 });
 
+test("classified-dangerous-only mode allows uncertainty but preserves positive risks", () => {
+	const relaxed = policyWith({ guardUnclassifiedCommands: false });
+	const uncertaintyOnly = [
+		'rg kubectl README.md',
+		'grep -R terraform docs',
+		'(git status --short && git log -1 --oneline)',
+		'$TOOL apply',
+		'K=kubectl; $K delete pod api',
+		'bash -lc "kubectl delete pod api"',
+		'eval kubectl delete pod api',
+		'if kubectl get pods; then true; fi',
+		'sudo --chdir kubectl get pods',
+		'find /bin -exec {} -rf target \\;',
+		'docker-compose ps',
+		'docker --future-global-option run nginx:latest',
+		'git --future-global-option status',
+		'vault future-command --future-option',
+		'aws madeup inspect-resource',
+		'az madeup inspect-resource',
+		'gcloud alpha compute instances list',
+		'gcloud --flags-file flags.yaml compute instances list',
+		'kubectl future-command resource',
+		'terraform future-command',
+		'helm future-command',
+		'argocd future-command',
+	];
+	for (const command of uncertaintyOnly) {
+		const conservative = evaluateCommand(command);
+		assert.equal(conservative.allow, false, `conservative: ${command}`);
+		if (!conservative.allow) assert.equal(conservative.basis, "unclassified", command);
+		assert.equal(evaluateCommand(command, relaxed).allow, true, `relaxed: ${command}`);
+	}
+	assert.equal(evaluateCommand('rg -n "kubectl|vault" README.md').allow, true, "quoted search was already allowed");
+	assert.equal(evaluateCommand('rg -n "kubectl|vault" README.md', relaxed).allow, true);
+
+	for (const command of [
+		"rm target",
+		"kubectl delete pod api",
+		"vault read secret/production",
+		"terraform apply",
+		"docker exec api sh",
+		"docker run --privileged nginx",
+		"helm template api ./chart --post-renderer ./renderer",
+		"git -c alias.deploy='!dangerous-command' deploy",
+		"kubectl --raw=/api/v1/secrets",
+		`rsync -e "sh -c 'rm -rf target'" source/ host:destination/`,
+	]) {
+		const decision = evaluateCommand(command, relaxed);
+		assert.equal(decision.allow, false, command);
+		if (!decision.allow) assert.equal(decision.basis, "knownRisk", command);
+	}
+});
+
+test("strongest policy basis wins across composed and delegated commands", () => {
+	const relaxed = policyWith({ guardUnclassifiedCommands: false });
+	for (const command of [
+		"rg kubectl README.md; rm target",
+		"$TOOL inspect; terraform apply",
+		"rm target; rg kubectl README.md",
+		"find . -exec printf kubectl {} \\; -exec rm {} \\;",
+	]) {
+		const decision = evaluateCommand(command, relaxed);
+		assert.equal(decision.allow, false, command);
+		if (!decision.allow) assert.equal(decision.basis, "knownRisk", command);
+	}
+
+	const commands: CommandOverrides = {
+		...DEFAULT_COMMAND_OVERRIDES,
+		git: { allow: [], requireApproval: ["status"] },
+	};
+	const explicit = evaluateCommand("rg kubectl README.md; git status", policyWith({
+		guardUnclassifiedCommands: false,
+		commands,
+	}));
+	assert.equal(explicit.allow, false);
+	if (!explicit.allow) assert.equal(explicit.basis, "explicitRule");
+});
+
 test("wrapper matrix cannot hide guarded executables", () => {
 	const riskyCommands = [
 		"kubectl delete pod api",
@@ -460,11 +544,11 @@ test("individual guard toggles bypass only their configured CLI", () => {
 
 	for (const [executable, command] of Object.entries(riskyCommands) as Array<[GuardedExecutable, string]>) {
 		const settings = { ...DEFAULT_GUARD_SETTINGS, [executable]: false };
-		assert.equal(evaluateCommand(command, settings).allow, true, executable);
-		assert.equal(evaluateCommand(`sudo ${command}`, settings).allow, true, `wrapped ${executable}`);
-		assert.equal(evaluateCommand(`${command} terraform`, settings).allow, true, `enabled guard name as argument to ${executable}`);
+		assert.equal(evaluateCommand(command, policyWith({ guards: settings })).allow, true, executable);
+		assert.equal(evaluateCommand(`sudo ${command}`, policyWith({ guards: settings })).allow, true, `wrapped ${executable}`);
+		assert.equal(evaluateCommand(`${command} terraform`, policyWith({ guards: settings })).allow, true, `enabled guard name as argument to ${executable}`);
 		assert.equal(
-			evaluateCommand(`${command} && kubectl delete pod still-guarded`, settings).allow,
+			evaluateCommand(`${command} && kubectl delete pod still-guarded`, policyWith({ guards: settings })).allow,
 			executable === "kubectl",
 			`mixed ${executable}`,
 		);
@@ -476,16 +560,16 @@ test("disabling every guard bypasses ambiguity and interactive-session restricti
 		Object.keys(DEFAULT_GUARD_SETTINGS).map((executable) => [executable, false]),
 	) as Record<GuardedExecutable, boolean>;
 	for (const command of ["$TOOL delete target", 'bash -lc "rm -rf target"', "kubectl delete pod api && terraform apply"]) {
-		assert.equal(evaluateCommand(command, disabled).allow, true, command);
+		assert.equal(evaluateCommand(command, policyWith({ guards: disabled })).allow, true, command);
 	}
 });
 
 test("disabled guards compose with enabled guards without hiding them", () => {
 	const settings = { ...DEFAULT_GUARD_SETTINGS, rm: false };
-	assert.equal(evaluateCommand('bash -lc "rm -rf target"', settings).allow, true);
-	assert.equal(evaluateCommand("rm terraform && terraform plan", settings).allow, true);
-	assert.equal(evaluateCommand("rm terraform && terraform apply", settings).allow, false);
-	assert.equal(evaluateCommand("$TOOL delete target", settings).allow, false);
+	assert.equal(evaluateCommand('bash -lc "rm -rf target"', policyWith({ guards: settings })).allow, true);
+	assert.equal(evaluateCommand("rm terraform && terraform plan", policyWith({ guards: settings })).allow, true);
+	assert.equal(evaluateCommand("rm terraform && terraform apply", policyWith({ guards: settings })).allow, false);
+	assert.equal(evaluateCommand("$TOOL delete target", policyWith({ guards: settings })).allow, false);
 });
 
 test("custom allow rules bypass built-in policy after global-option normalization", () => {
@@ -529,14 +613,14 @@ test("custom allow rules bypass built-in policy after global-option normalizatio
 		"truncate -s 0 build.log",
 		"unlink build.log",
 	]) {
-		assert.equal(evaluateCommand(command, DEFAULT_GUARD_SETTINGS, commands).allow, true, command);
+		assert.equal(evaluateCommand(command, policyWith({ commands })).allow, true, command);
 	}
 	assert.equal(
-		evaluateCommand("kubectl delete pod production-api", DEFAULT_GUARD_SETTINGS, commands).allow,
+		evaluateCommand("kubectl delete pod production-api", policyWith({ commands })).allow,
 		false,
 	);
 	assert.equal(
-		evaluateCommand("terraform output && kubectl delete pod production-api", DEFAULT_GUARD_SETTINGS, commands).allow,
+		evaluateCommand("terraform output && kubectl delete pod production-api", policyWith({ commands })).allow,
 		false,
 	);
 });
@@ -560,7 +644,7 @@ test("custom requireApproval rules override allow rules and built-in safe policy
 		"gcloud --project production compute instances list",
 		"kubectl port-forward service/api 8080:80",
 	]) {
-		const decision = evaluateCommand(command, DEFAULT_GUARD_SETTINGS, commands);
+		const decision = evaluateCommand(command, policyWith({ commands }));
 		assert.equal(decision.allow, false, command);
 		if (!decision.allow) assert.match(decision.reason, /Custom command rule requires approval/);
 	}
@@ -583,8 +667,12 @@ test("custom allow rules cannot bypass opaque behavior flags", () => {
 		`rsync -e "sh -c 'rm -rf target'" source/ host:destination/`,
 		`rsync --rsync-path='rm -rf target; rsync' source/ host:destination/`,
 	]) {
-		assert.equal(evaluateCommand(command, DEFAULT_GUARD_SETTINGS, commands).allow, false, command);
+		assert.equal(evaluateCommand(command, policyWith({ commands })).allow, false, command);
 	}
+	const relaxed = policyWith({ guardUnclassifiedCommands: false, commands });
+	assert.equal(evaluateCommand("gcloud compute instances list --flags-file=hidden.yaml", relaxed).allow, true);
+	assert.equal(evaluateCommand("git -c alias.deploy='!dangerous-command' deploy", relaxed).allow, false);
+	assert.equal(evaluateCommand("helm template api ./chart --post-renderer ./renderer", relaxed).allow, false);
 });
 
 test("CLI master toggles take precedence over custom command rules", () => {
@@ -593,5 +681,5 @@ test("CLI master toggles take precedence over custom command rules", () => {
 		...DEFAULT_COMMAND_OVERRIDES,
 		terraform: { allow: [], requireApproval: ["apply"] },
 	};
-	assert.equal(evaluateCommand("terraform apply", guards, commands).allow, true);
+	assert.equal(evaluateCommand("terraform apply", policyWith({ guards, commands })).allow, true);
 });

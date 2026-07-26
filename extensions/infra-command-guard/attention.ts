@@ -5,9 +5,11 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	DEFAULT_COMMAND_OVERRIDES,
+	DEFAULT_COMMAND_POLICY_SETTINGS,
 	DEFAULT_GUARD_SETTINGS,
 	GUARDED_EXECUTABLES,
 	type CommandOverrides,
+	type CommandPolicySettings,
 	type GuardSettings,
 } from "./guarded-executables.ts";
 
@@ -22,9 +24,9 @@ type ApprovalAttentionSettings = {
 	sound: { enabled: boolean; path: string | null };
 	integrations: { herdr: { enabled: boolean } };
 };
-type InfraCommandGuardSettings = ApprovalAttentionSettings & {
-	guards: GuardSettings;
-	commands: CommandOverrides;
+type InfraCommandGuardSettings = ApprovalAttentionSettings & CommandPolicySettings;
+type MutableCommandPolicySettings = {
+	-readonly [Key in keyof CommandPolicySettings]: CommandPolicySettings[Key];
 };
 
 const DEFAULT_ATTENTION_SETTINGS: ApprovalAttentionSettings = {
@@ -34,8 +36,7 @@ const DEFAULT_ATTENTION_SETTINGS: ApprovalAttentionSettings = {
 };
 const DEFAULT_SETTINGS: InfraCommandGuardSettings = {
 	...DEFAULT_ATTENTION_SETTINGS,
-	guards: DEFAULT_GUARD_SETTINGS,
-	commands: DEFAULT_COMMAND_OVERRIDES,
+	...DEFAULT_COMMAND_POLICY_SETTINGS,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -71,16 +72,28 @@ function parseCommandRuleList(value: unknown, label: string): string[] {
 
 function parseSettings(value: unknown, configPath: string): InfraCommandGuardSettings {
 	if (!isRecord(value)) throw new Error("configuration root must be a JSON object");
-	assertKnownKeys(value, ["$schema", "guards", "commands", "notifications", "sound", "integrations"], "configuration root");
+	assertKnownKeys(
+		value,
+		["$schema", "guardUnclassifiedCommands", "guards", "commands", "notifications", "sound", "integrations"],
+		"configuration root",
+	);
 
 	let guards: GuardSettings = DEFAULT_GUARD_SETTINGS;
-	const settings: InfraCommandGuardSettings = {
+	const settings: ApprovalAttentionSettings & MutableCommandPolicySettings = {
 		notifications: { ...DEFAULT_ATTENTION_SETTINGS.notifications },
 		sound: { ...DEFAULT_ATTENTION_SETTINGS.sound },
 		integrations: { herdr: { ...DEFAULT_ATTENTION_SETTINGS.integrations.herdr } },
+		guardUnclassifiedCommands: DEFAULT_COMMAND_POLICY_SETTINGS.guardUnclassifiedCommands,
 		guards,
 		commands: DEFAULT_COMMAND_OVERRIDES,
 	};
+
+	if (value.guardUnclassifiedCommands !== undefined) {
+		if (typeof value.guardUnclassifiedCommands !== "boolean") {
+			throw new Error("guardUnclassifiedCommands must be true or false");
+		}
+		settings.guardUnclassifiedCommands = value.guardUnclassifiedCommands;
+	}
 
 	if (value.guards !== undefined) {
 		if (!isRecord(value.guards)) throw new Error("guards must be a JSON object");
@@ -172,7 +185,12 @@ function parseSettings(value: unknown, configPath: string): InfraCommandGuardSet
 }
 
 function parseApprovalAttentionSettings(value: unknown, configPath: string): ApprovalAttentionSettings {
-	const { guards: _guards, commands: _commands, ...attention } = parseSettings(value, configPath);
+	const {
+		guardUnclassifiedCommands: _guardUnclassifiedCommands,
+		guards: _guards,
+		commands: _commands,
+		...attention
+	} = parseSettings(value, configPath);
 	return attention;
 }
 
@@ -210,19 +228,28 @@ function loadApprovalAttentionSettings(configPath = join(getAgentDir(), CONFIG_F
 	error?: string;
 } {
 	const loaded = loadSettings(configPath);
-	const { guards: _guards, commands: _commands, ...settings } = loaded.settings;
+	const {
+		guardUnclassifiedCommands: _guardUnclassifiedCommands,
+		guards: _guards,
+		commands: _commands,
+		...settings
+	} = loaded.settings;
 	return { configPath: loaded.configPath, settings, ...(loaded.error ? { error: loaded.error } : {}) };
 }
 
 function loadPolicySettings(configPath = join(getAgentDir(), CONFIG_FILE_NAME)): {
 	configPath: string;
-	settings: { guards: GuardSettings; commands: CommandOverrides };
+	settings: CommandPolicySettings;
 	error?: string;
 } {
 	const loaded = loadSettings(configPath);
 	return {
 		configPath: loaded.configPath,
-		settings: { guards: loaded.settings.guards, commands: loaded.settings.commands },
+		settings: {
+			guardUnclassifiedCommands: loaded.settings.guardUnclassifiedCommands,
+			guards: loaded.settings.guards,
+			commands: loaded.settings.commands,
+		},
 		...(loaded.error ? { error: loaded.error } : {}),
 	};
 }

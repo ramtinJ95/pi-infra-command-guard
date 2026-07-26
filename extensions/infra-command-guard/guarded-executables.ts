@@ -22,6 +22,11 @@ type GuardedExecutable = (typeof GUARDED_EXECUTABLES)[number];
 type GuardSettings = Readonly<Record<GuardedExecutable, boolean>>;
 type CommandOverrideRules = Readonly<{ allow: readonly string[]; requireApproval: readonly string[] }>;
 type CommandOverrides = Readonly<Record<GuardedExecutable, CommandOverrideRules>>;
+type CommandPolicySettings = Readonly<{
+	guardUnclassifiedCommands: boolean;
+	guards: GuardSettings;
+	commands: CommandOverrides;
+}>;
 
 const DEFAULT_GUARD_SETTINGS = {
 	argocd: true,
@@ -63,6 +68,12 @@ const DEFAULT_COMMAND_OVERRIDES = {
 	vault: { allow: [], requireApproval: [] },
 } satisfies CommandOverrides;
 
+const DEFAULT_COMMAND_POLICY_SETTINGS = {
+	guardUnclassifiedCommands: true,
+	guards: DEFAULT_GUARD_SETTINGS,
+	commands: DEFAULT_COMMAND_OVERRIDES,
+} satisfies CommandPolicySettings;
+
 function enabledGuardedExecutables(settings: GuardSettings): GuardedExecutable[] {
 	return GUARDED_EXECUTABLES.filter((executable) => settings[executable]);
 }
@@ -75,7 +86,8 @@ export {
 	GUARDED_EXECUTABLES,
 	DEFAULT_GUARD_SETTINGS,
 	DEFAULT_COMMAND_OVERRIDES,
+	DEFAULT_COMMAND_POLICY_SETTINGS,
 	enabledGuardedExecutables,
 	hasEnabledGuards,
 };
-export type { CommandOverrideRules, CommandOverrides, GuardedExecutable, GuardSettings };
+export type { CommandOverrideRules, CommandOverrides, CommandPolicySettings, GuardedExecutable, GuardSettings };

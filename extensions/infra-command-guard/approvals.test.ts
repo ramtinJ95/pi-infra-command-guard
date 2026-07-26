@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { ApprovalStore, executionIdentity, guardExecution } from "./approvals.ts";
-import { DEFAULT_GUARD_SETTINGS } from "./guarded-executables.ts";
+import { DEFAULT_COMMAND_POLICY_SETTINGS, DEFAULT_GUARD_SETTINGS } from "./guarded-executables.ts";
 import { test } from "./test-harness.ts";
 
 test("approval is bound to the blocked execution context and consumed once", () => {
@@ -116,6 +116,18 @@ test("non-TUI calls fail closed without creating an unusable approval request", 
 	assert.doesNotMatch(guarded.reason, /approve_infra_command/);
 });
 
+test("classified-dangerous-only mode skips uncertainty approvals but keeps known risks", () => {
+	const store = new ApprovalStore(() => 1_000, () => "relaxed-request");
+	const relaxed = { ...DEFAULT_COMMAND_POLICY_SETTINGS, guardUnclassifiedCommands: false };
+	const uncertain = executionIdentity("exec-command", { cmd: 'rg -n "kubectl|vault" README.md' }, "/tmp")!;
+	assert.deepEqual(guardExecution(store, uncertain, "tui", relaxed), { allow: true });
+
+	const risky = executionIdentity("exec-command", { cmd: "kubectl delete pod api" }, "/tmp")!;
+	const blocked = guardExecution(store, risky, "tui", relaxed);
+	assert.equal(blocked.allow, false);
+	assert.equal(blocked.requestId, "relaxed-request");
+});
+
 test("interactive interpreters are denied rather than approvable", () => {
 	const store = new ApprovalStore(() => 1_000, () => "unused-request");
 	for (const command of ["bash", "sudo /bin/zsh", "env python3.12", "exec node"]) {
@@ -127,7 +139,15 @@ test("interactive interpreters are denied rather than approvable", () => {
 	}
 	const nonInteractive = executionIdentity("code-mode-exec-command", { cmd: "bash -lc 'printf safe'" }, "/tmp")!;
 	assert.deepEqual(guardExecution(store, nonInteractive, "tui"), { allow: true });
+	const relaxed = { ...DEFAULT_COMMAND_POLICY_SETTINGS, guardUnclassifiedCommands: false };
+	const relaxedInteractive = executionIdentity("code-mode-exec-command", { cmd: "bash", tty: true }, "/tmp")!;
+	const relaxedGuarded = guardExecution(store, relaxedInteractive, "tui", relaxed);
+	assert.equal(relaxedGuarded.allow, false);
+	if (!relaxedGuarded.allow) assert.match(relaxedGuarded.reason, /write_stdin input cannot be classified reliably/);
 	const disabled = Object.fromEntries(Object.keys(DEFAULT_GUARD_SETTINGS).map((key) => [key, false])) as never;
 	const interactive = executionIdentity("code-mode-exec-command", { cmd: "bash", tty: true }, "/tmp")!;
-	assert.deepEqual(guardExecution(store, interactive, "tui", disabled), { allow: true });
+	assert.deepEqual(
+		guardExecution(store, interactive, "tui", { ...DEFAULT_COMMAND_POLICY_SETTINGS, guards: disabled }),
+		{ allow: true },
+	);
 });
