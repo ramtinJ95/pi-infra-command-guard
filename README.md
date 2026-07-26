@@ -2,6 +2,15 @@
 
 Global pi extension that wraps the built-in `bash` tool and intercepts direct and GPT-5.6 Code Mode `exec_command` calls, asking for approval before higher-risk infrastructure, cloud, and destructive local-file commands.
 
+> [!WARNING]
+> Setting `guardUnclassifiedCommands` to `false` opts into a less conservative mode: commands run without approval when the extension cannot positively classify them as dangerous. This can allow dangerous behavior hidden by unsupported shell syntax, variables, shell runners, unknown CLI operations, or unread external inputs. The extension is not a sandbox; operating-system and service permissions remain the hard security boundary.
+
+```json
+{
+  "guardUnclassifiedCommands": false
+}
+```
+
 ## Install
 
 ```bash
@@ -89,15 +98,15 @@ Explicitly low-risk operations including:
 
 ### AWS CLI
 
-Read-style service operations such as `describe-*`, `get-*`, `list-*`, `head-*`, `search-*`, `scan`, `query`, and waiters are allowed. Explicit diagnostics and content reads include CloudWatch Logs filtering/tailing, S3 Select, RDS log download, Route 53 DNS tests, and CloudFormation cost estimation. Sensitive exceptions remain guarded, including Secrets Manager reads, SSM parameter-value retrieval, credential/token retrieval, and STS operations other than `get-caller-identity`. Unknown operations fail closed.
+Read-style service operations such as `describe-*`, `get-*`, `list-*`, `head-*`, `search-*`, `scan`, `query`, and waiters are allowed. Explicit diagnostics and content reads include CloudWatch Logs filtering/tailing, S3 Select, RDS log download, Route 53 DNS tests, and CloudFormation cost estimation. Sensitive exceptions remain guarded, including Secrets Manager reads, SSM parameter-value retrieval, credential/token retrieval, and STS operations other than `get-caller-identity`. Unknown operations require approval by default and are allowed in classified-dangerous-only mode unless their action is recognized as a mutation.
 
 ### Azure CLI
 
-Stable commands with explicit read-style actions such as `list`, `show`, `get-*`, `exists`, `query`, diagnostics/tests, log tailing, patch assessment, `status`, `validate`, `wait`, and deployment `what-if` are allowed. Secret, credential, key-value, connection-string, and app-setting reads remain guarded. Mutating or unknown actions fail closed.
+Stable commands with explicit read-style actions such as `list`, `show`, `get-*`, `exists`, `query`, diagnostics/tests, log tailing, patch assessment, `status`, `validate`, `wait`, and deployment `what-if` are allowed. Secret, credential, key-value, connection-string, and app-setting reads remain guarded. Mutating actions remain guarded; unknown actions require approval by default.
 
 ### Google Cloud CLI
 
-Stable commands with explicit read-style actions such as `list`, `describe`, `get-*`, `read`, `search-*`, logs, storage `cat`/`du`/`hash`, IAM policy troubleshooting, `status`, and operation waits are allowed. Authentication-token output, credential retrieval, and Secret Manager reads remain guarded. `alpha`, `beta`, `--flags-file`, mutating, and unknown commands fail closed.
+Stable commands with explicit read-style actions such as `list`, `describe`, `get-*`, `read`, `search-*`, logs, storage `cat`/`du`/`hash`, IAM policy troubleshooting, `status`, and operation waits are allowed. Authentication-token output, credential retrieval, Secret Manager reads, and recognized mutations remain guarded. `alpha`, `beta`, `--flags-file`, and unknown commands require approval by default.
 
 ### Docker
 
@@ -117,9 +126,9 @@ Unknown Git subcommands are allowed. The guard does not read repository or user 
 
 ### Vault
 
-Vault uses a strict low-risk allowlist because reads can return secrets and mutations can change authentication or control-plane state. Bare help, help topics, version, status, and common command-specific help forms are allowed. Every other command requires approval.
+Vault uses a strict low-risk allowlist by default because reads can return secrets and mutations can change authentication or control-plane state. Bare help, help topics, version, status, and common command-specific help forms are allowed. Known sensitive Vault families remain guarded in both modes; unknown commands are allowed only in classified-dangerous-only mode.
 
-Guarded operations include `read`, `list`, `unwrap`, KV reads and writes, generic write/delete, login and token operations, auth methods, secrets engines, policies, operator lifecycle commands, agent/server processes, and unknown commands. Narrow `commands.vault.allow` rules can deliberately permit a trusted path or operation after global server/namespace options are normalized.
+Guarded operations include `read`, `list`, `unwrap`, KV reads and writes, generic write/delete, login and token operations, auth methods, secrets engines, policies, operator lifecycle commands, and agent/server processes. Unknown commands require approval only in the default conservative mode. Narrow `commands.vault.allow` rules can deliberately permit a trusted path or operation after global server/namespace options are normalized.
 
 The guard classifies argv only. Vault policies, response wrapping, namespaces, mount behavior, environment-provided addresses/tokens, and server-side plugin behavior remain outside the lexical policy.
 
@@ -138,10 +147,10 @@ Ordinary `find` searches and `rsync` transfers without deletion flags are allowe
 - `unlink`, `rmdir`, `shred`, and `truncate` mutations
 - `find -delete`
 - `rsync --delete`, its timing/exclusion variants, `--delete-missing-args`, and `--remove-source-files` unless dry-run mode is active
-- Executables resolved through shell variables, such as `$TOOL ...`
-- Assignment-based indirection such as `K=kubectl; $K ...`
-- Commands the guard cannot classify safely
-- Indirect shell-runner patterns such as `bash -lc "kubectl ..."` or `xargs kubectl ...`, except for commands whose kubectl usage is limited to `port-forward`
+- Executables resolved through shell variables, such as `$TOOL ...`, by default
+- Assignment-based indirection such as `K=kubectl; $K ...`, by default
+- Commands the guard cannot classify safely, by default
+- Indirect shell-runner patterns such as `bash -lc "kubectl ..."` or `xargs kubectl ...`, by default, except for commands whose kubectl usage is limited to `port-forward`
 - Some sensitive read paths, e.g. Kubernetes secrets, cloud secret values, credentials, tokens, keys, and connection strings
 
 ## Approval flow
@@ -174,6 +183,20 @@ The current package is validated with Pi 0.81.1 and `@howaboua/pi-codex-conversi
 
 Configure the extension in `~/.pi/agent/infra-command-guard.json`. When `PI_CODING_AGENT_DIR` overrides Pi's configuration directory, put `infra-command-guard.json` there instead. The extension reads the file for every shell command and approval request, so edits apply immediately without `/reload`.
 
+### Classified-dangerous-only mode
+
+`guardUnclassifiedCommands` defaults to `true`, preserving conservative behavior for omitted and existing configurations. Set it to `false` only when you accept that classification gaps can bypass approval:
+
+```json
+{
+  "guardUnclassifiedCommands": false
+}
+```
+
+With `false`, uncertainty alone is allowed: unsupported shell or wrapper syntax, dynamic executable variables, opaque shell runners, unknown CLI operations, unsupported global-option layouts, indirect guarded names used as search data, and unread inputs such as `gcloud --flags-file`. Positively recognized mutations, sensitive reads, destructive local-file operations, and arbitrary-execution or raw-control capabilities remain guarded—for example `rm`, `kubectl delete`, `vault read`, `terraform apply`, Docker privileged/exec forms, Helm post-renderers, invocation-local Git aliases, and `kubectl --raw`.
+
+Matching `commands.<cli>.requireApproval` rules still require approval. Custom `allow` rules and guard toggles retain their documented precedence. Interactive TTY shell/interpreter sessions and incompatible Code Mode execution channels remain blocked because those channels cannot be guarded at all. Invalid configuration restores the conservative `true` default with every guard enabled and shows a Pi warning.
+
 ### Guard toggles
 
 Every guard is enabled by default. Add only the overrides you need:
@@ -189,7 +212,7 @@ Every guard is enabled by default. Add only the overrides you need:
 }
 ```
 
-Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `git`, `vault`, `rm`, `unlink`, `rmdir`, `shred`, `truncate`, `find`, and `rsync`. A disabled guard bypasses policy checks for direct, path-qualified, and recognized wrapper invocations such as `sudo` and `env`. Enabled guards in the same command remain enforced. Dynamic executable expressions such as `$TOOL apply` still require approval while any guard is enabled because the target cannot be identified safely. Opaque shell-runner commands also remain conservative when they mention an enabled guard name.
+Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `git`, `vault`, `rm`, `unlink`, `rmdir`, `shred`, `truncate`, `find`, and `rsync`. A disabled guard bypasses policy checks for direct, path-qualified, and recognized wrapper invocations such as `sudo` and `env`. Enabled guards in the same command remain enforced. Dynamic executable expressions and opaque shell-runner commands require approval while any guard is enabled unless classified-dangerous-only mode is selected.
 
 Changing guard settings invalidates pending requests and unused one-time approvals. Run the command again under the new configuration if approval is still required.
 
@@ -221,7 +244,7 @@ Enabled guards can customize individual commands:
 
 Rules omit the executable and match case-sensitive normalized argument prefixes. Executable paths and recognized wrappers such as `sudo` and `env` are ignored. Known non-command global CLI options are removed wherever they occur before matching, while command-specific flags, arguments, and command-like `--help`/`--version` options retain their order. `*` matches characters within one token and never crosses whitespace. For example, `delete pod dev-*` matches `sudo kubectl --context production delete pod dev-api --wait=false`, but not `kubectl delete pod production-api`. Because rules are prefixes, every trailing argument is also covered by the match; use `requireApproval` for narrower exceptions that must remain guarded.
 
-Overrides apply only after the shell invocation has been parsed safely. They do not bypass dynamic executable, opaque shell-runner, unsupported shell syntax, interactive-session, rsync executable-option, `kubectl --raw`, `gcloud --flags-file`, Helm post-renderer, or invocation-local Git alias restrictions. Changing command rules also invalidates pending requests and unused approvals. Invalid rules are ignored together with the rest of the invalid configuration, leaving every guard enabled under its built-in policy.
+Overrides apply only after the shell invocation has been parsed. They do not bypass interactive-session, rsync executable-option, `kubectl --raw`, Helm post-renderer, or invocation-local Git alias restrictions. Dynamic executable, opaque shell-runner, unsupported shell syntax, and `gcloud --flags-file` uncertainty remains non-bypassable by an `allow` rule but is allowed when `guardUnclassifiedCommands` is `false`. Changing command rules also invalidates pending requests and unused approvals. Invalid rules are ignored together with the rest of the invalid configuration, leaving every guard enabled under its built-in policy.
 
 ### Approval notifications and sound
 

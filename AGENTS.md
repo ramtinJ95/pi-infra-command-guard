@@ -17,6 +17,7 @@ Use this shape:
 ```json
 {
   "$schema": "https://raw.githubusercontent.com/ramtinJ95/pi-infra-command-guard/main/infra-command-guard.schema.json",
+  "guardUnclassifiedCommands": true,
   "guards": {
     "kubectl": true,
     "terraform": true,
@@ -57,6 +58,8 @@ Use this shape:
   }
 }
 ```
+
+`guardUnclassifiedCommands` defaults to `true`. Setting it to `false` deliberately allows commands whose only risk is classification uncertainty, including unsupported shell syntax, dynamic executables, opaque runners, unknown CLI operations, and unread inputs. Positively recognized risks, explicit `requireApproval` rules, interactive TTY restrictions, and Code Mode compatibility blocking remain enforced. Explain that this mode can miss dangerous behavior and that OS/service permissions remain the hard boundary.
 
 All guard keys default to `true`; users may specify only overrides. Available keys are `kubectl`, `terraform`, `helm`, `argocd`, `aws`, `az`, `gcloud`, `docker`, `git`, `vault`, `find`, `rm`, `rmdir`, `rsync`, `shred`, `truncate`, and `unlink`. Disabled guards bypass checks for that executable while enabled guards in mixed commands remain enforced. If every guard is disabled, dynamic executable and interactive-session restrictions are also bypassed because no guarded target remains.
 
