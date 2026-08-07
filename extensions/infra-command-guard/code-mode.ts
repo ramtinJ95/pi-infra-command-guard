@@ -1,97 +1,102 @@
-const CODE_MODE_RUNTIME_KEY = Symbol.for("@howaboua/pi-codex-conversion.code-mode");
-const CODE_MODE_GUARD_BRIDGE_KEY = Symbol.for("infra-command-guard.code-mode-bridge.v1");
-const CODE_MODE_PROVIDER_WRAPPED = Symbol.for("infra-command-guard.code-mode-provider-wrapped.v1");
-const CODE_MODE_TOOL_WRAPPED = Symbol.for("infra-command-guard.code-mode-tool-wrapped.v1");
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
-type PropertyBag = Record<PropertyKey, unknown>;
-type CodeModeGuardBridge = (input: unknown, context: unknown) => void | Promise<void>;
-type CodeModeToolInvoke = (input: unknown, context: unknown, signal: AbortSignal) => unknown;
+const PREFLIGHT_BROKER_REQUEST_CHANNEL =
+	"@howaboua/pi-codex-conversion/code-mode-tool-preflight/request/v1";
+const PREFLIGHT_BROKER_AVAILABLE_CHANNEL =
+	"@howaboua/pi-codex-conversion/code-mode-tool-preflight/available/v1";
 
-function isPropertyBag(value: unknown): value is PropertyBag {
-	return typeof value === "object" && value !== null;
+interface CodeModeToolCall {
+	toolName: string;
+	toolCallId: string;
+	input: unknown;
+	cwd: string;
+	extensionContext?: ExtensionContext | undefined;
+	signal: AbortSignal;
 }
 
-function codeModeRuntime(events: unknown): PropertyBag | undefined {
-	if (!isPropertyBag(events)) return undefined;
-	const state = events[CODE_MODE_RUNTIME_KEY];
-	if (!isPropertyBag(state)) return undefined;
-	return isPropertyBag(state.runtime) ? state.runtime : undefined;
+type CodeModeToolPreflightResult =
+	| { block: true; reason: string }
+	| undefined;
+
+type CodeModeToolPreflight = (
+	call: CodeModeToolCall,
+) => CodeModeToolPreflightResult | Promise<CodeModeToolPreflightResult>;
+
+interface CodeModeToolPreflightBroker {
+	version: 1;
+	isActive(): boolean;
+	register(id: object, handler: CodeModeToolPreflight): () => void;
 }
 
-function codeModeProviders(runtime: unknown): unknown[] | undefined {
-	if (isPropertyBag(runtime) && runtime.providers instanceof Map) return [...runtime.providers.values()];
-	return undefined;
+interface CodeModeToolPreflightRegistration {
+	isAvailable(): boolean;
+	unregister(): void;
 }
 
-function ensureCodeModeGuardInstalled(events: unknown, context: unknown): { ok: true } | { ok: false; reason: string } {
-	const runtime = codeModeRuntime(events);
-	if (!runtime) return { ok: false, reason: "Code Mode runtime was not found" };
-	const providers = codeModeProviders(runtime);
-	if (!providers) return { ok: false, reason: "Code Mode provider registry has an unsupported shape" };
+function registerCodeModeToolPreflight(
+	pi: ExtensionAPI,
+	handler: CodeModeToolPreflight,
+): CodeModeToolPreflightRegistration {
+	const id = {};
+	let active = true;
+	let broker: CodeModeToolPreflightBroker | undefined;
+	let unregisterFromBroker: (() => void) | undefined;
 
-	try {
-		for (const candidate of providers) {
-			if (!isPropertyBag(candidate) || typeof candidate.getTools !== "function" || candidate[CODE_MODE_PROVIDER_WRAPPED]) {
-				continue;
-			}
-			const provider = candidate;
-			const getTools = provider.getTools as (this: unknown, context: unknown) => unknown;
-			provider.getTools = function guardedGetTools(this: unknown, providerContext: unknown) {
-				const tools = getTools.call(this, providerContext);
-				if (!Array.isArray(tools)) return tools;
-				return tools.map((candidateTool: unknown) => {
-					if (
-						!isPropertyBag(candidateTool) ||
-						candidateTool.name !== "exec_command" ||
-						typeof candidateTool.invoke !== "function" ||
-						candidateTool[CODE_MODE_TOOL_WRAPPED]
-					) {
-						return candidateTool;
-					}
-					const tool = candidateTool;
-					const invoke = tool.invoke as CodeModeToolInvoke;
-					const guardedTool = {
-						...tool,
-						async invoke(input: unknown, toolContext: unknown, signal: AbortSignal) {
-							const bridge = isPropertyBag(events) ? events[CODE_MODE_GUARD_BRIDGE_KEY] : undefined;
-							if (typeof bridge !== "function") {
-								throw new Error("BLOCKED — infra-command-guard Code Mode bridge is unavailable. Reload Pi before using Code Mode.");
-							}
-							await bridge(input, toolContext);
-							return invoke.call(tool, input, toolContext, signal);
-						},
-					};
-					Object.defineProperty(guardedTool, CODE_MODE_TOOL_WRAPPED, { value: true });
-					return guardedTool;
-				});
-			};
-			Object.defineProperty(provider, CODE_MODE_PROVIDER_WRAPPED, { value: true });
-		}
+	const connect = (candidate: unknown) => {
+		if (!active || !isCodeModeToolPreflightBroker(candidate)) return;
+		if (candidate === broker && candidate.isActive()) return;
+		unregisterFromBroker?.();
+		broker = candidate;
+		unregisterFromBroker = candidate.register(id, handler);
+	};
+	const stopListening = pi.events.on(
+		PREFLIGHT_BROKER_AVAILABLE_CHANNEL,
+		connect,
+	);
+	pi.events.emit(PREFLIGHT_BROKER_REQUEST_CHANNEL, { connect });
 
-		const hasGuardedExec = providers.some((provider) => {
-			if (!isPropertyBag(provider) || typeof provider.getTools !== "function") return false;
-			const tools = provider.getTools(context);
-			return Array.isArray(tools) && tools.some((tool: unknown) =>
-				isPropertyBag(tool) && tool.name === "exec_command" && Boolean(tool[CODE_MODE_TOOL_WRAPPED]));
-		});
-		return hasGuardedExec
-			? { ok: true }
-			: { ok: false, reason: "Code Mode nested exec_command provider was not found" };
-	} catch (error) {
-		return {
-			ok: false,
-			reason: `Code Mode guard installation failed: ${error instanceof Error ? error.message : String(error)}`,
-		};
-	}
+	const unregister = () => {
+		if (!active) return;
+		active = false;
+		stopListening();
+		unregisterFromBroker?.();
+		unregisterFromBroker = undefined;
+		broker = undefined;
+	};
+	pi.on("session_shutdown", unregister);
+	return {
+		isAvailable: () => active && Boolean(broker?.isActive()),
+		unregister,
+	};
+}
+
+function isCodeModeToolPreflightBroker(
+	value: unknown,
+): value is CodeModeToolPreflightBroker {
+	return Boolean(
+		value &&
+			typeof value === "object" &&
+			"version" in value &&
+			value.version === 1 &&
+			"isActive" in value &&
+			typeof value.isActive === "function" &&
+			"register" in value &&
+			typeof value.register === "function",
+	);
 }
 
 export {
-	CODE_MODE_RUNTIME_KEY,
-	CODE_MODE_GUARD_BRIDGE_KEY,
-	CODE_MODE_PROVIDER_WRAPPED,
-	CODE_MODE_TOOL_WRAPPED,
-	codeModeRuntime,
-	codeModeProviders,
-	ensureCodeModeGuardInstalled,
+	PREFLIGHT_BROKER_AVAILABLE_CHANNEL,
+	PREFLIGHT_BROKER_REQUEST_CHANNEL,
+	registerCodeModeToolPreflight,
 };
-export type { CodeModeGuardBridge };
+export type {
+	CodeModeToolCall,
+	CodeModeToolPreflight,
+	CodeModeToolPreflightBroker,
+	CodeModeToolPreflightRegistration,
+	CodeModeToolPreflightResult,
+};

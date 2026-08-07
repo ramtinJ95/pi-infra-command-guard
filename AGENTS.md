@@ -134,7 +134,7 @@ After editing the file, have the user run `/infra-guard-notify-test`. Terminal p
 - `policy.ts`: guarded-command orchestration, custom command-rule matching, and stable policy exports
 - `approvals.ts`: execution identity, expiring one-time grants, and guard decisions
 - `approval-ui.ts`: structured approval overlay
-- `code-mode.ts`: private Code Mode runtime adapter and reload-safe bridge symbols
+- `code-mode.ts`: Pi event-bus client for Code Mode's awaited nested-tool preflight broker
 - `guarded-executables.ts`: canonical guarded executable names shared by scanning and policy dispatch
 - `index.ts`: Pi hooks, tools, commands, and lifecycle composition
 

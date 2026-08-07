@@ -173,11 +173,11 @@ The request identifier is required. Missing, expired, or mismatched request iden
 
 ## Code Mode integration
 
-The current integration wraps Code Mode's in-process nested `exec_command` provider. The wrapper resolves dynamic JavaScript before applying the guard, so commands assembled at runtime are covered without parsing the outer JavaScript source.
+The integration registers an awaited nested-tool preflight through Pi's public cross-extension event bus. Code Mode resolves the JavaScript tool name and input first, then runs the guard before invoking `exec_command`, so commands assembled at runtime are covered without parsing the outer JavaScript source.
 
-This adapter uses `pi-codex-conversion` internals until that package exposes a supported nested-tool preflight API. The guard installs the wrapper at session/turn startup and verifies it again before every outer `exec` or `wait`. If an update changes those internals, the outer Code Mode call is blocked with a compatibility error instead of silently running unguarded.
+The guard verifies that a compatible preflight broker is connected before every outer `exec` or `wait`. If Code Mode is absent or too old to expose the supported API, the outer call is blocked instead of silently running unguarded. Other nested Code Mode tools pass through unchanged.
 
-The current package is validated with Pi 0.81.1 and `@howaboua/pi-codex-conversion` 2.2.16. Normal Pi `bash` guarding does not require Code Mode. Because the Code Mode adapter intentionally fails closed around private internals, test the guard after upgrading either package.
+This integration is validated with Pi 0.84.1 and requires a `@howaboua/pi-codex-conversion` release containing the Code Mode nested-tool preflight API. Normal Pi `bash` and structured `exec_command` guarding do not require Code Mode.
 
 ## Configuration
 

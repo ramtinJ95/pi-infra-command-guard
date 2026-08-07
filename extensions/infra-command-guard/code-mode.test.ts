@@ -1,119 +1,135 @@
 import assert from "node:assert/strict";
 import {
-	CODE_MODE_GUARD_BRIDGE_KEY,
-	CODE_MODE_RUNTIME_KEY,
-	CODE_MODE_TOOL_WRAPPED,
-	ensureCodeModeGuardInstalled,
+	PREFLIGHT_BROKER_AVAILABLE_CHANNEL,
+	PREFLIGHT_BROKER_REQUEST_CHANNEL,
+	registerCodeModeToolPreflight,
+	type CodeModeToolPreflight,
+	type CodeModeToolPreflightBroker,
 } from "./code-mode.ts";
 import { test } from "./test-harness.ts";
 
-test("Code Mode provider wrapper blocks before invoke and reads the current reload bridge", async () => {
-	let invokeCount = 0;
-	const provider = {
-		getTools() {
-			return [
-				{
-					name: "exec_command",
-					async invoke(_input?: unknown, _context?: unknown, _signal?: AbortSignal) {
-						invokeCount += 1;
-						return "ran";
-					},
-				},
-			];
-		},
-	};
-	const events: Record<PropertyKey, unknown> = {
-		[CODE_MODE_RUNTIME_KEY]: { runtime: { providers: new Map([[{}, provider]]) } },
-	};
-	events[CODE_MODE_GUARD_BRIDGE_KEY] = () => {
-		throw new Error("blocked by test bridge");
-	};
-
-	assert.deepEqual(ensureCodeModeGuardInstalled(events, { cwd: "/tmp" }), { ok: true });
-	assert.deepEqual(ensureCodeModeGuardInstalled(events, { cwd: "/tmp" }), { ok: true });
-	const firstTool = provider.getTools()[0]!;
-	assert.equal(Object.prototype.hasOwnProperty.call(firstTool, CODE_MODE_TOOL_WRAPPED), true);
-	await assert.rejects(firstTool.invoke({ cmd: "rm target" }, { cwd: "/tmp" }), /blocked by test bridge/);
-	assert.equal(invokeCount, 0);
-
-	let bridgeCount = 0;
-	events[CODE_MODE_GUARD_BRIDGE_KEY] = () => {
-		bridgeCount += 1;
-	};
-	assert.equal(await firstTool.invoke({ cmd: "printf safe" }, { cwd: "/tmp" }), "ran");
-	assert.equal(bridgeCount, 1);
-	assert.equal(invokeCount, 1);
-
-	delete events[CODE_MODE_GUARD_BRIDGE_KEY];
-	await assert.rejects(firstTool.invoke({ cmd: "printf safe" }, { cwd: "/tmp" }), /bridge is unavailable/);
-	assert.equal(invokeCount, 1);
-});
-
-test("Code Mode adapter guards providers added after startup", async () => {
-	const calls: string[] = [];
-	const createProvider = (name: string) => ({
-		getTools() {
-			return [
-				{
-					name: "exec_command",
-					async invoke(_input?: unknown, _context?: unknown, _signal?: AbortSignal) {
-						calls.push(name);
-						return name;
-					},
-				},
-			];
-		},
-	});
-	const first = createProvider("first");
-	const providers = new Map<object, ReturnType<typeof createProvider>>([[{}, first]]);
-	const events: Record<PropertyKey, unknown> = {
-		[CODE_MODE_RUNTIME_KEY]: { runtime: { providers } },
-		[CODE_MODE_GUARD_BRIDGE_KEY]: () => undefined,
-	};
-	assert.deepEqual(ensureCodeModeGuardInstalled(events, {}), { ok: true });
-	assert.equal(await first.getTools()[0]!.invoke({}, {}), "first");
-
-	const second = createProvider("second");
-	providers.set({}, second);
-	assert.deepEqual(ensureCodeModeGuardInstalled(events, {}), { ok: true });
-	assert.equal(await second.getTools()[0]!.invoke({}, {}), "second");
-	assert.deepEqual(calls, ["first", "second"]);
-
-});
-
-test("Code Mode integration fails closed when private runtime internals are unavailable", () => {
-	assert.deepEqual(ensureCodeModeGuardInstalled({}, { cwd: "/tmp" }), {
-		ok: false,
-		reason: "Code Mode runtime was not found",
-	});
-	assert.deepEqual(
-		ensureCodeModeGuardInstalled({ [CODE_MODE_RUNTIME_KEY]: { runtime: {} } }, { cwd: "/tmp" }),
-		{ ok: false, reason: "Code Mode provider registry has an unsupported shape" },
-	);
-	assert.deepEqual(
-		ensureCodeModeGuardInstalled({ [CODE_MODE_RUNTIME_KEY]: { providers: [] } }, { cwd: "/tmp" }),
-		{ ok: false, reason: "Code Mode runtime was not found" },
-	);
-	assert.deepEqual(
-		ensureCodeModeGuardInstalled(
-			{ [CODE_MODE_RUNTIME_KEY]: { runtime: { providers: new Map([[{}, { getTools: () => [] }]]) } } },
-			{ cwd: "/tmp" },
-		),
-		{ ok: false, reason: "Code Mode nested exec_command provider was not found" },
-	);
-	assert.deepEqual(
-		ensureCodeModeGuardInstalled(
-			{
-				[CODE_MODE_RUNTIME_KEY]: {
-					runtime: {
-						providers: new Map([
-							[{}, { getTools: () => { throw new Error("provider failed"); } }],
-						]),
-					},
+function createTestApis() {
+	const listeners = new Map<string, Set<(data: unknown) => void>>();
+	const createPi = () => {
+		const shutdownHandlers: Array<() => void> = [];
+		const events = {
+			emit(channel: string, data: unknown) {
+				for (const handler of [...(listeners.get(channel) ?? [])]) handler(data);
+			},
+			on(channel: string, handler: (data: unknown) => void) {
+				const handlers = listeners.get(channel) ?? new Set();
+				handlers.add(handler);
+				listeners.set(channel, handlers);
+				return () => handlers.delete(handler);
+			},
+		};
+		return {
+			pi: {
+				events,
+				on(name: string, handler: () => void) {
+					if (name === "session_shutdown") shutdownHandlers.push(handler);
 				},
 			},
-			{ cwd: "/tmp" },
-		),
-		{ ok: false, reason: "Code Mode guard installation failed: provider failed" },
-	);
+			shutdown() {
+				for (const handler of shutdownHandlers) handler();
+			},
+		};
+	};
+	return createPi;
+}
+
+function createBroker(pi: ReturnType<ReturnType<typeof createTestApis>>["pi"]) {
+	const handlers = new Map<object, CodeModeToolPreflight>();
+	let active = true;
+	const broker: CodeModeToolPreflightBroker = {
+		version: 1,
+		isActive: () => active,
+		register(id, handler) {
+			handlers.set(id, handler);
+			return () => handlers.delete(id);
+		},
+	};
+	const stopRequests = pi.events.on(PREFLIGHT_BROKER_REQUEST_CHANNEL, (request) => {
+		if (
+			request &&
+			typeof request === "object" &&
+			"connect" in request &&
+			typeof request.connect === "function"
+		) request.connect(broker);
+	});
+	pi.events.emit(PREFLIGHT_BROKER_AVAILABLE_CHANNEL, broker);
+	return {
+		handlers,
+		shutdown() {
+			active = false;
+			handlers.clear();
+			stopRequests();
+		},
+	};
+}
+
+for (const order of ["broker-first", "guard-first"] as const) {
+	test(`Code Mode guard preflight connects through isolated Pi 0.84 event facades (${order})`, async () => {
+		const createPi = createTestApis();
+		const codeMode = createPi();
+		const guard = createPi();
+		assert.notEqual(codeMode.pi.events, guard.pi.events);
+		let broker: ReturnType<typeof createBroker>;
+		let registration: ReturnType<typeof registerCodeModeToolPreflight>;
+		const registerGuard = () => registerCodeModeToolPreflight(
+			guard.pi as never,
+			(call) => call.toolName === "exec_command"
+				? { block: true, reason: "blocked by guard" }
+				: undefined,
+		);
+		if (order === "broker-first") {
+			broker = createBroker(codeMode.pi);
+			registration = registerGuard();
+		} else {
+			registration = registerGuard();
+			assert.equal(registration.isAvailable(), false);
+			broker = createBroker(codeMode.pi);
+		}
+
+		assert.equal(registration.isAvailable(), true);
+		const handler = [...broker.handlers.values()][0]!;
+		assert.deepEqual(
+			await handler({
+				toolName: "exec_command",
+				toolCallId: "nested-1",
+				input: { cmd: "rm target" },
+				cwd: "/tmp",
+				signal: new AbortController().signal,
+			}),
+			{ block: true, reason: "blocked by guard" },
+		);
+		assert.equal(
+			await handler({
+				toolName: "apply_patch",
+				toolCallId: "nested-2",
+				input: "patch",
+				cwd: "/tmp",
+				signal: new AbortController().signal,
+			}),
+			undefined,
+		);
+
+		guard.shutdown();
+		assert.equal(registration.isAvailable(), false);
+		assert.equal(broker.handlers.size, 0);
+		broker.shutdown();
+	});
+}
+
+test("Code Mode guard ignores incompatible preflight brokers", () => {
+	const createPi = createTestApis();
+	const guard = createPi();
+	const registration = registerCodeModeToolPreflight(guard.pi as never, () => undefined);
+	guard.pi.events.emit(PREFLIGHT_BROKER_AVAILABLE_CHANNEL, {
+		version: 2,
+		isActive: () => true,
+		register() { return () => {}; },
+	});
+	assert.equal(registration.isAvailable(), false);
+	guard.shutdown();
 });

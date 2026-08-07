@@ -4,8 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { APPROVAL_STORE_KEY } from "./approvals.ts";
 import {
-	CODE_MODE_GUARD_BRIDGE_KEY,
-	CODE_MODE_RUNTIME_KEY,
+	PREFLIGHT_BROKER_AVAILABLE_CHANNEL,
+	PREFLIGHT_BROKER_REQUEST_CHANNEL,
+	type CodeModeToolCall,
+	type CodeModeToolPreflight,
+	type CodeModeToolPreflightBroker,
 } from "./code-mode.ts";
 import createExtension from "./index.ts";
 import { test } from "./test-harness.ts";
@@ -30,176 +33,154 @@ const ALL_GUARDS_DISABLED = {
 	unlink: false,
 };
 
-test("outer Code Mode calls fail closed when the private runtime is absent", async () => {
+function createTestEventBus() {
+	const listeners = new Map<string, Set<(data: unknown) => void>>();
+	return {
+		facade() {
+			return {
+				emit(channel: string, data: unknown) {
+					for (const handler of [...(listeners.get(channel) ?? [])]) handler(data);
+				},
+				on(channel: string, handler: (data: unknown) => void) {
+					const handlers = listeners.get(channel) ?? new Set();
+					handlers.add(handler);
+					listeners.set(channel, handlers);
+					return () => handlers.delete(handler);
+				},
+			};
+		},
+	};
+}
+
+type EventFacade = ReturnType<ReturnType<typeof createTestEventBus>["facade"]>;
+
+function createHarness(events: EventFacade) {
 	const handlers = new Map<string, Array<(event: any, context: any) => unknown>>();
+	const tools: any[] = [];
 	const pi = {
-		events: {},
+		events,
 		registerCommand() {},
-		registerTool() {},
+		registerTool(tool: any) { tools.push(tool); },
 		on(name: string, handler: (event: any, context: any) => unknown) {
 			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
 		},
 	};
 	createExtension(pi as never);
+	return { handlers, pi, tools };
+}
+
+function createPreflightBroker(events: EventFacade) {
+	const handlers = new Map<object, CodeModeToolPreflight>();
+	let active = true;
+	const broker: CodeModeToolPreflightBroker = {
+		version: 1,
+		isActive: () => active,
+		register(id, handler) {
+			handlers.set(id, handler);
+			return () => handlers.delete(id);
+		},
+	};
+	const stopRequests = events.on(PREFLIGHT_BROKER_REQUEST_CHANNEL, (request) => {
+		if (
+			request &&
+			typeof request === "object" &&
+			"connect" in request &&
+			typeof request.connect === "function"
+		) request.connect(broker);
+	});
+	events.emit(PREFLIGHT_BROKER_AVAILABLE_CHANNEL, broker);
+	return {
+		handlers,
+		shutdown() {
+			active = false;
+			handlers.clear();
+			stopRequests();
+		},
+	};
+}
+
+function nestedCall(cmd: string): CodeModeToolCall {
+	return {
+		toolName: "exec_command",
+		toolCallId: "nested-exec",
+		input: { cmd },
+		cwd: "/tmp",
+		extensionContext: { cwd: "/tmp", mode: "tui" } as never,
+		signal: new AbortController().signal,
+	};
+}
+
+test("outer Code Mode calls fail closed when nested preflights are unavailable", async () => {
+	const events = createTestEventBus().facade();
+	const { handlers } = createHarness(events);
 	const toolCall = handlers.get("tool_call")![0]!;
 	for (const toolName of ["exec", "wait", "functions.exec", "functions.wait"]) {
 		const decision = await toolCall({ toolName, input: {} }, { cwd: "/tmp", mode: "tui" });
 		assert.deepEqual(decision, {
 			block: true,
-			reason: "BLOCKED — infra-command-guard cannot safely intercept Code Mode: Code Mode runtime was not found. Reload Pi or disable Code Mode before running commands.",
+			reason: "BLOCKED — infra-command-guard cannot safely intercept Code Mode because its nested-tool preflight API is unavailable. Update pi-codex-conversion or disable Code Mode before running commands.",
 		});
 	}
 });
 
-test("extension outer exec hook installs the nested guard before Code Mode collects tools", async () => {
-	let invokeCount = 0;
-	const provider = {
-		getTools() {
-			return [
-				{
-					name: "exec_command",
-					async invoke(_input?: unknown, _context?: unknown, _signal?: AbortSignal) {
-						invokeCount += 1;
-					},
-				},
-			];
-		},
-	};
-	const events: Record<PropertyKey, unknown> = {
-		[CODE_MODE_RUNTIME_KEY]: { runtime: { providers: new Map([[{}, provider]]) } },
-	};
-	const handlers = new Map<string, Array<(event: any, context: any) => unknown>>();
-	const pi = {
-		events,
-		registerCommand() {},
-		registerTool() {},
-		on(name: string, handler: (event: any, context: any) => unknown) {
-			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
-		},
-	};
-	createExtension(pi as never);
+test("extension allows outer Code Mode calls only after its nested preflight connects", async () => {
+	const bus = createTestEventBus();
+	const broker = createPreflightBroker(bus.facade());
+	const { handlers } = createHarness(bus.facade());
+	const toolCall = handlers.get("tool_call")![0]!;
 	const context = { cwd: "/tmp", mode: "tui" };
-	for (const handler of handlers.get("before_agent_start") ?? []) {
-		assert.equal(await handler({}, context), undefined);
-	}
-	const preparedNested = provider.getTools()[0]!;
-	await assert.rejects(
-		preparedNested.invoke(
-			{ cmd: "rm prepared-target" },
-			{ cwd: "/tmp", extensionContext: context },
-		),
-		/Approval request:/,
+	assert.equal(
+		await toolCall({ toolName: "exec", input: { code: "dynamic" } }, context),
+		undefined,
 	);
-	assert.equal(invokeCount, 0);
-	for (const handler of handlers.get("tool_call") ?? []) {
-		assert.equal(await handler({ toolName: "exec", input: { code: "dynamic" } }, context), undefined);
-	}
-	const nested = provider.getTools()[0]!;
-	await assert.rejects(
-		nested.invoke(
-			{ cmd: "rm guarded-target" },
-			{ cwd: "/tmp", extensionContext: context },
-		),
-		/Approval request:/,
+	const preflight = [...broker.handlers.values()][0]!;
+	const blocked = await preflight(nestedCall("rm guarded-target"));
+	assert.equal(blocked?.block, true);
+	assert.match(blocked?.reason ?? "", /Approval request:/);
+	assert.equal(
+		await preflight({ ...nestedCall("ignored"), toolName: "apply_patch" }),
+		undefined,
 	);
-	assert.equal(invokeCount, 0);
+	broker.shutdown();
 });
 
-test("Code Mode wrapper switches bridges safely across guard reloads", async () => {
-	let invokeCount = 0;
-	const provider = {
-		getTools() {
-			return [
-				{
-					name: "exec_command",
-					async invoke(_input?: unknown, _context?: unknown, _signal?: AbortSignal) {
-						invokeCount += 1;
-					},
-				},
-			];
-		},
-	};
-	const events: Record<PropertyKey, unknown> = {
-		[CODE_MODE_RUNTIME_KEY]: { runtime: { providers: new Map([[{}, provider]]) } },
-	};
-	const createPi = () => {
-		const handlers = new Map<string, Array<(event: any, context: any) => unknown>>();
-		return {
-			pi: {
-				events,
-				registerCommand() {},
-				registerTool() {},
-				on(name: string, handler: (event: any, context: any) => unknown) {
-					handlers.set(name, [...(handlers.get(name) ?? []), handler]);
-				},
-			},
-			handlers,
-		};
-	};
-	const context = { cwd: "/tmp", mode: "tui" };
-	const first = createPi();
-	createExtension(first.pi as never);
-	for (const handler of first.handlers.get("before_agent_start") ?? []) await handler({}, context);
-	const wrappedBeforeReload = provider.getTools()[0]!;
-	await assert.rejects(
-		wrappedBeforeReload.invoke({ cmd: "rm first" }, { cwd: "/tmp", extensionContext: context }),
-		/Approval request:/,
-	);
-	for (const handler of first.handlers.get("session_shutdown") ?? []) await handler({}, context);
-	await assert.rejects(
-		wrappedBeforeReload.invoke({ cmd: "printf safe" }, { cwd: "/tmp", extensionContext: context }),
-		/bridge is unavailable/,
-	);
+test("Code Mode preflight registrations switch safely across guard reloads", async () => {
+	const bus = createTestEventBus();
+	const broker = createPreflightBroker(bus.facade());
+	const first = createHarness(bus.facade());
+	assert.equal(broker.handlers.size, 1);
+	for (const handler of first.handlers.get("session_shutdown") ?? []) await handler({}, {});
+	assert.equal(broker.handlers.size, 0);
 
-	const second = createPi();
-	createExtension(second.pi as never);
-	for (const handler of second.handlers.get("before_agent_start") ?? []) await handler({}, context);
-	await assert.rejects(
-		wrappedBeforeReload.invoke({ cmd: "rm second" }, { cwd: "/tmp", extensionContext: context }),
-		/Approval request:/,
-	);
-	assert.equal(invokeCount, 0);
+	const second = createHarness(bus.facade());
+	assert.equal(broker.handlers.size, 1);
+	const preflight = [...broker.handlers.values()][0]!;
+	const blocked = await preflight(nestedCall("rm after-reload"));
+	assert.equal(blocked?.block, true);
+	assert.match(blocked?.reason ?? "", /Approval request:/);
+	for (const handler of second.handlers.get("session_shutdown") ?? []) await handler({}, {});
+	broker.shutdown();
 });
 
-test("stale approval tool closures follow the current reload store", async () => {
-	const events: Record<PropertyKey, unknown> = {};
-	const createPi = () => {
-		const tools: any[] = [];
-		return {
-			pi: {
-				events,
-				registerCommand() {},
-				registerTool(tool: any) {
-					tools.push(tool);
-				},
-				on() {},
-			},
-			tools,
-		};
-	};
-	const first = createPi();
-	createExtension(first.pi as never);
-	const firstStore = events[APPROVAL_STORE_KEY];
-	const staleApprovalTool = first.tools.find((tool) => tool.name === "approve_infra_command")!;
-	assert.ok(staleApprovalTool.parameters.required.includes("request_id"));
-
-	const second = createPi();
-	createExtension(second.pi as never);
-	assert.notEqual(events[APPROVAL_STORE_KEY], firstStore);
-	const bridge = events[CODE_MODE_GUARD_BRIDGE_KEY] as (input: unknown, context: unknown) => void;
-	let blocked = "";
-	try {
-		bridge({ cmd: "rm stale-reload-test" }, { cwd: "/tmp", extensionContext: { mode: "tui" } });
-	} catch (error) {
-		blocked = error instanceof Error ? error.message : String(error);
-	}
-	const requestId = blocked.match(/Approval request: ([0-9a-f-]+)/)?.[1];
+test("approval requests do not leak across Pi 0.84 extension instances", async () => {
+	const bus = createTestEventBus();
+	const first = createHarness(bus.facade());
+	const firstToolCall = first.handlers.get("tool_call")![0]!;
+	const blocked = await firstToolCall(
+		{ toolName: "exec_command", input: { cmd: "rm old-instance" } },
+		{ cwd: "/tmp", mode: "tui" },
+	) as { reason: string };
+	const requestId = blocked.reason.match(/Approval request: ([0-9a-f-]+)/)?.[1];
 	assert.ok(requestId);
-	const result = await staleApprovalTool.execute(
+	for (const handler of first.handlers.get("session_shutdown") ?? []) await handler({}, {});
+
+	const second = createHarness(bus.facade());
+	const approvalTool = second.tools.find((tool) => tool.name === "approve_infra_command")!;
+	const result = await approvalTool.execute(
 		"approval-test",
 		{
 			request_id: requestId,
-			command: "rm stale-reload-test",
+			command: "rm old-instance",
 			reason: "rm command needs confirmation",
 			summary: "test",
 			flags: [],
@@ -209,7 +190,7 @@ test("stale approval tool closures follow the current reload store", async () =>
 		undefined,
 		{ mode: "rpc" },
 	);
-	assert.match(result.content[0].text, /TUI approval UI is not available/);
+	assert.match(result.content[0].text, /missing or expired/);
 });
 
 test("extension reloads guard toggles and command rules for each command", async () => {
@@ -218,17 +199,8 @@ test("extension reloads guard toggles and command rules for each command", async
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = directory;
 	try {
-		const handlers = new Map<string, Array<(event: any, context: any) => unknown>>();
-		const tools: any[] = [];
-		const pi = {
-			events: {},
-			registerCommand() {},
-			registerTool(tool: any) { tools.push(tool); },
-			on(name: string, handler: (event: any, context: any) => unknown) {
-				handlers.set(name, [...(handlers.get(name) ?? []), handler]);
-			},
-		};
-		createExtension(pi as never);
+		const events = createTestEventBus().facade();
+		const { handlers, pi, tools } = createHarness(events);
 		const toolCall = handlers.get("tool_call")![0]!;
 		const warnings: string[] = [];
 		const context = {
@@ -308,76 +280,46 @@ test("extension reloads guard toggles and command rules for each command", async
 	}
 });
 
-test("Code Mode reloads guard toggles and command rules without losing interception", async () => {
+test("Code Mode reloads guard toggles and command rules without losing preflight interception", async () => {
 	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-code-mode-config-"));
 	const configPath = join(directory, "infra-command-guard.json");
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = directory;
 	try {
-		let invokeCount = 0;
-		const provider = {
-			getTools() {
-				return [{
-					name: "exec_command",
-					async invoke(_input?: unknown, _context?: unknown) { invokeCount += 1; },
-				}];
-			},
-		};
-		const events: Record<PropertyKey, unknown> = {};
-		const handlers = new Map<string, Array<(event: any, context: any) => unknown>>();
-		const pi = {
-			events,
-			registerCommand() {},
-			registerTool() {},
-			on(name: string, handler: (event: any, context: any) => unknown) {
-				handlers.set(name, [...(handlers.get(name) ?? []), handler]);
-			},
-		};
-		createExtension(pi as never);
-		events[CODE_MODE_RUNTIME_KEY] = { runtime: { providers: new Map([[{}, provider]]) } };
-		const context = { cwd: "/tmp", mode: "tui" };
-		const toolCall = handlers.get("tool_call")![0]!;
+		const bus = createTestEventBus();
+		const broker = createPreflightBroker(bus.facade());
+		createHarness(bus.facade());
+		const preflight = [...broker.handlers.values()][0]!;
 
 		writeFileSync(configPath, JSON.stringify({ guards: ALL_GUARDS_DISABLED }));
-		assert.equal(await toolCall({ toolName: "exec", input: { code: "dynamic" } }, context), undefined);
-		const nested = provider.getTools()[0]!;
+		assert.equal(await preflight(nestedCall("rm disabled")), undefined);
 
 		writeFileSync(configPath, JSON.stringify({ guards: { rm: false, terraform: true } }));
-		await nested.invoke({ cmd: "rm disabled" }, { cwd: "/tmp", extensionContext: context });
-		assert.equal(invokeCount, 1);
-		await assert.rejects(
-			nested.invoke({ cmd: "rm disabled && terraform apply" }, { cwd: "/tmp", extensionContext: context }),
-			/terraform apply is not on the low-risk allowlist/,
-		);
-		assert.equal(invokeCount, 1);
+		assert.equal(await preflight(nestedCall("rm disabled")), undefined);
+		const terraform = await preflight(nestedCall("rm disabled && terraform apply"));
+		assert.equal(terraform?.block, true);
+		assert.match(terraform?.reason ?? "", /terraform apply is not on the low-risk allowlist/);
 
 		const searchCommand = "rg kubectl README.md";
 		writeFileSync(configPath, JSON.stringify({ guardUnclassifiedCommands: false }));
-		await nested.invoke({ cmd: searchCommand }, { cwd: "/tmp", extensionContext: context });
-		assert.equal(invokeCount, 2);
+		assert.equal(await preflight(nestedCall(searchCommand)), undefined);
 		writeFileSync(configPath, JSON.stringify({ guardUnclassifiedCommands: true }));
-		await assert.rejects(
-			nested.invoke({ cmd: searchCommand }, { cwd: "/tmp", extensionContext: context }),
-			/invokes guarded tooling/,
-		);
-		assert.equal(invokeCount, 2);
+		const conservative = await preflight(nestedCall(searchCommand));
+		assert.equal(conservative?.block, true);
+		assert.match(conservative?.reason ?? "", /invokes guarded tooling/);
 
 		writeFileSync(configPath, JSON.stringify({ commands: { rm: { allow: ["code-mode-target"] } } }));
-		await nested.invoke({ cmd: "rm code-mode-target" }, { cwd: "/tmp", extensionContext: context });
-		assert.equal(invokeCount, 3);
+		assert.equal(await preflight(nestedCall("rm code-mode-target")), undefined);
 		writeFileSync(configPath, JSON.stringify({ commands: { rm: { requireApproval: ["code-mode-target"] } } }));
-		await assert.rejects(
-			nested.invoke({ cmd: "rm code-mode-target" }, { cwd: "/tmp", extensionContext: context }),
-			/Custom command rule requires approval/,
-		);
-		assert.equal(invokeCount, 3);
+		const required = await preflight(nestedCall("rm code-mode-target"));
+		assert.equal(required?.block, true);
+		assert.match(required?.reason ?? "", /Custom command rule requires approval/);
 
 		writeFileSync(configPath, JSON.stringify({ guards: { rm: "off" } }));
-		await assert.rejects(
-			nested.invoke({ cmd: "rm invalid-config" }, { cwd: "/tmp", extensionContext: context }),
-			/rm command needs confirmation/,
-		);
-		assert.equal(invokeCount, 3);
+		const invalid = await preflight(nestedCall("rm invalid-config"));
+		assert.equal(invalid?.block, true);
+		assert.match(invalid?.reason ?? "", /rm command needs confirmation/);
+		broker.shutdown();
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

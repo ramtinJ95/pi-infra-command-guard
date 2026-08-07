@@ -10,11 +10,8 @@ import {
 import { requestInfraApproval } from "./approval-ui.ts";
 import { loadPolicySettings, requestApprovalAttention } from "./attention.ts";
 import {
-	CODE_MODE_GUARD_BRIDGE_KEY,
-	CODE_MODE_RUNTIME_KEY,
-	codeModeRuntime,
-	ensureCodeModeGuardInstalled,
-	type CodeModeGuardBridge,
+	registerCodeModeToolPreflight,
+	type CodeModeToolPreflight,
 } from "./code-mode.ts";
 import {
 	hasEnabledGuards,
@@ -68,47 +65,31 @@ export default function createExtension(pi: ExtensionAPI) {
 		}
 		return loaded.settings;
 	};
-	const codeModeBridge: CodeModeGuardBridge = (input, context) => {
-		const contextRecord = typeof context === "object" && context !== null
-			? context as Record<string, unknown>
-			: {};
-		const nestedContext = typeof contextRecord.extensionContext === "object" && contextRecord.extensionContext !== null
-			? contextRecord.extensionContext as Record<string, unknown>
-			: contextRecord;
-		const policySettings = currentPolicySettings(nestedContext as { ui?: ExtensionContext["ui"] });
-		if (!hasEnabledGuards(policySettings.guards)) return;
+	const codeModeGuard: CodeModeToolPreflight = (call) => {
+		if (call.toolName !== "exec_command") return undefined;
+		const nestedContext = call.extensionContext;
+		const policySettings = currentPolicySettings(nestedContext);
+		if (!hasEnabledGuards(policySettings.guards)) return undefined;
 		const identity = executionIdentity(
 			"code-mode-exec-command",
-			input,
-			typeof contextRecord.cwd === "string"
-				? contextRecord.cwd
-				: typeof nestedContext.cwd === "string"
-					? nestedContext.cwd
-					: process.cwd(),
+			call.input,
+			call.cwd,
 		);
 		if (!identity) {
-			throw new Error("BLOCKED — infra-command-guard could not identify the nested exec_command request.");
+			return {
+				block: true,
+				reason: "BLOCKED — infra-command-guard could not identify the nested exec_command request.",
+			};
 		}
 		const guarded = guardExecution(
 			currentApprovals(),
 			identity,
-			typeof nestedContext.mode === "string" ? nestedContext.mode : undefined,
+			nestedContext?.mode,
 			policySettings,
 		);
-		if (!guarded.allow) throw new Error(guarded.reason);
+		return guarded.allow ? undefined : { block: true, reason: guarded.reason };
 	};
-	events[CODE_MODE_GUARD_BRIDGE_KEY] = codeModeBridge;
-	const prepareCodeModeGuard = (ctx: ExtensionContext) => {
-		if (!codeModeRuntime(events)) return undefined;
-		return ensureCodeModeGuardInstalled(events, ctx);
-	};
-
-	pi.on("session_start", (_event, ctx) => {
-		prepareCodeModeGuard(ctx);
-	});
-	pi.on("before_agent_start", (_event, ctx) => {
-		prepareCodeModeGuard(ctx);
-	});
+	const codeModeRegistration = registerCodeModeToolPreflight(pi, codeModeGuard);
 
 	pi.registerCommand("infra-guard-notify-test", {
 		description: "Test infra-command-guard notification and sound configuration",
@@ -188,16 +169,11 @@ export default function createExtension(pi: ExtensionAPI) {
 	pi.on("tool_call", (event, ctx) => {
 		if (CODE_MODE_PUBLIC_TOOL_NAMES.has(event.toolName)) {
 			const policySettings = currentPolicySettings(ctx);
-			const installed = prepareCodeModeGuard(ctx);
-			if (installed?.ok) return undefined;
 			if (!hasEnabledGuards(policySettings.guards)) return undefined;
-			const failed = installed ?? {
-				ok: false as const,
-				reason: "Code Mode runtime was not found",
-			};
+			if (codeModeRegistration.isAvailable()) return undefined;
 			return {
 				block: true,
-				reason: `BLOCKED — infra-command-guard cannot safely intercept Code Mode: ${failed.reason}. Reload Pi or disable Code Mode before running commands.`,
+				reason: "BLOCKED — infra-command-guard cannot safely intercept Code Mode because its nested-tool preflight API is unavailable. Update pi-codex-conversion or disable Code Mode before running commands.",
 			};
 		}
 
@@ -233,9 +209,6 @@ export default function createExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
-		if (events[CODE_MODE_GUARD_BRIDGE_KEY] === codeModeBridge) {
-			delete events[CODE_MODE_GUARD_BRIDGE_KEY];
-		}
 		if (events[APPROVAL_STORE_KEY] === approvals) delete events[APPROVAL_STORE_KEY];
 	});
 }
