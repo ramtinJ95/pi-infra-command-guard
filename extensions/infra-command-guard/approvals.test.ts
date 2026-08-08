@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { ApprovalStore, executionIdentity, guardExecution } from "./approvals.ts";
+import { GuardBypassStore } from "./bypass.ts";
 import { DEFAULT_COMMAND_POLICY_SETTINGS, DEFAULT_GUARD_SETTINGS } from "./guarded-executables.ts";
 import { test } from "./test-harness.ts";
 
@@ -150,4 +151,97 @@ test("interactive interpreters are denied rather than approvable", () => {
 		guardExecution(store, interactive, "tui", { ...DEFAULT_COMMAND_POLICY_SETTINGS, guards: disabled }),
 		{ allow: true },
 	);
+});
+
+test("an active pause allows guarded commands without touching approvals", () => {
+	const store = new ApprovalStore(() => 1_000, () => "paused-request");
+	const bypasses = new GuardBypassStore(() => 1_000);
+	const identity = executionIdentity("bash", { command: "rm paused-target" }, "/tmp")!;
+	assert.equal(guardExecution(store, identity, "tui", DEFAULT_COMMAND_POLICY_SETTINGS, bypasses).allow, false);
+	bypasses.pause(10 * 60 * 1000);
+	assert.deepEqual(guardExecution(store, identity, "tui", DEFAULT_COMMAND_POLICY_SETTINGS, bypasses), { allow: true });
+});
+
+test("interactive interpreter blocks ignore pauses and bypass rules", () => {
+	const store = new ApprovalStore(() => 1_000, () => "tty-request");
+	const bypasses = new GuardBypassStore(() => 1_000);
+	bypasses.pause(10 * 60 * 1000);
+	const identity = executionIdentity("bash", { command: "bash", tty: true }, "/tmp")!;
+	const guarded = guardExecution(store, identity, "tui", DEFAULT_COMMAND_POLICY_SETTINGS, bypasses);
+	assert.equal(guarded.allow, false);
+	assert.match(guarded.reason, /interactive shell and interpreter sessions/);
+});
+
+test("scoped bypass rules allow matching prefixes in the stored cwd only", () => {
+	const store = new ApprovalStore(() => 1_000, () => "bypass-request");
+	const bypasses = new GuardBypassStore(() => 1_000);
+	const identity = executionIdentity(
+		"bash",
+		{ command: "kubectl --kubeconfig /tmp/kc delete pod foo" },
+		"/repo",
+	)!;
+
+	const first = guardExecution(store, identity, "tui", DEFAULT_COMMAND_POLICY_SETTINGS, bypasses);
+	assert.equal(first.allow, false);
+	assert.deepEqual(first.bypassInfo, {
+		executable: "kubectl",
+		normalizedPrefix: ["--kubeconfig", "/tmp/kc", "delete", "pod", "foo"],
+		cwd: "/repo",
+	});
+
+	bypasses.addRule("kubectl", "/repo", ["--kubeconfig", "/tmp/kc", "delete", "pod"], 10 * 60 * 1000);
+	assert.deepEqual(guardExecution(store, identity, "tui", DEFAULT_COMMAND_POLICY_SETTINGS, bypasses), { allow: true });
+	assert.deepEqual(
+		guardExecution(
+			store,
+			executionIdentity("bash", { command: "kubectl --kubeconfig /tmp/kc delete pod bar -n default" }, "/repo/sub")!,
+			"tui",
+			DEFAULT_COMMAND_POLICY_SETTINGS,
+			bypasses,
+		),
+		{ allow: true },
+	);
+	assert.equal(
+		guardExecution(
+			store,
+			executionIdentity("bash", { command: "kubectl --kubeconfig /tmp/kc delete pod foo" }, "/other")!,
+			"tui",
+			DEFAULT_COMMAND_POLICY_SETTINGS,
+			bypasses,
+		).allow,
+		false,
+	);
+	assert.equal(
+		guardExecution(
+			store,
+			executionIdentity("bash", { command: "kubectl apply -f x.yaml" }, "/repo")!,
+			"tui",
+			DEFAULT_COMMAND_POLICY_SETTINGS,
+			bypasses,
+		).allow,
+		false,
+	);
+});
+
+test("unparseable commands and non-bypassable risks never produce a bypass offer", () => {
+	const store = new ApprovalStore(() => 1_000, () => "no-bypass-request");
+	const bypasses = new GuardBypassStore(() => 1_000);
+	const unparseable = guardExecution(
+		store,
+		executionIdentity("bash", { command: "kubectl delete pod foo `" }, "/repo")!,
+		"tui",
+		DEFAULT_COMMAND_POLICY_SETTINGS,
+		bypasses,
+	);
+	assert.equal(unparseable.allow, false);
+	assert.equal(unparseable.bypassInfo, undefined);
+	const raw = guardExecution(
+		store,
+		executionIdentity("bash", { command: "kubectl get --raw=/api/v1" }, "/repo")!,
+		"tui",
+		DEFAULT_COMMAND_POLICY_SETTINGS,
+		bypasses,
+	);
+	assert.equal(raw.allow, false);
+	assert.equal(raw.bypassInfo, undefined);
 });
