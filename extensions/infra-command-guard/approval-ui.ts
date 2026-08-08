@@ -7,6 +7,13 @@ type ApprovalDetails = {
 	blastRadius: string;
 };
 
+type BypassOffer = {
+	label: string;
+	onSelect: (select: (title: string, options: string[]) => Promise<string | undefined>) => Promise<boolean>;
+};
+
+type ApprovalChoice = "cancel" | "once" | "bypass";
+
 function wrapBlock(text: string, width: number): string[] {
 	const normalized = String(text || "").replace(/\r\n/g, "\n");
 	const wrapped = [];
@@ -35,17 +42,27 @@ class InfraApprovalOverlay {
 		private approvalDetails: ApprovalDetails,
 		private reason: string,
 		private command: string,
-		private done: (approved: boolean) => void,
+		private bypass: BypassOffer | undefined,
+		private done: (choice: ApprovalChoice) => void,
 	) {}
+
+	private choiceCount(): number {
+		return this.bypass ? 3 : 2;
+	}
 
 	handleInput(data: string): void {
 		if (this.keybindings.matches(data, "tui.select.cancel") || matchesKey(data, "n")) {
-			this.done(false);
+			this.done("cancel");
 			return;
 		}
 
 		if (matchesKey(data, "y")) {
-			this.done(true);
+			this.done("once");
+			return;
+		}
+
+		if (matchesKey(data, "b") && this.bypass) {
+			this.done("bypass");
 			return;
 		}
 
@@ -102,7 +119,9 @@ class InfraApprovalOverlay {
 		}
 
 		if (this.keybindings.matches(data, "tui.select.confirm")) {
-			this.done(this.choiceIndex === 1);
+			if (this.choiceIndex === 0) this.done("cancel");
+			else if (this.choiceIndex === 1) this.done("once");
+			else this.done("bypass");
 		}
 	}
 
@@ -149,11 +168,13 @@ class InfraApprovalOverlay {
 		lines.push(border("│") + padLine(this.theme.fg("dim", scrollText)) + border("│"));
 		lines.push(border("│") + padLine(this.renderChoiceLine(0, "Cancel", "warning")) + border("│"));
 		lines.push(border("│") + padLine(this.renderChoiceLine(1, "Approve and run", "success")) + border("│"));
-		lines.push(
-			border("│") +
-				padLine(this.theme.fg("dim", " j/k or h/l move choice • Enter confirm • y allow • n or Esc cancel")) +
-				border("│"),
-		);
+		if (this.bypass) {
+			lines.push(border("│") + padLine(this.renderChoiceLine(2, this.bypass.label, "accent")) + border("│"));
+		}
+		const hint = this.bypass
+			? " j/k or h/l move choice • Enter confirm • y allow once • b bypass • n or Esc cancel"
+			: " j/k or h/l move choice • Enter confirm • y allow • n or Esc cancel";
+		lines.push(border("│") + padLine(this.theme.fg("dim", hint)) + border("│"));
 		lines.push(border(`╰${"─".repeat(innerWidth)}╯`));
 
 		return lines.map((line) => truncateToWidth(line, width));
@@ -193,7 +214,7 @@ class InfraApprovalOverlay {
 		return lines;
 	}
 
-	private renderChoiceLine(index: number, label: string, color: "warning" | "success"): string {
+	private renderChoiceLine(index: number, label: string, color: "warning" | "success" | "accent"): string {
 		const selected = this.choiceIndex === index;
 		const prefix = selected ? this.theme.fg("accent", "> ") : "  ";
 		const text = selected ? this.theme.bg("selectedBg", this.theme.fg(color, ` ${label} `)) : this.theme.fg("dim", label);
@@ -201,7 +222,7 @@ class InfraApprovalOverlay {
 	}
 
 	private moveChoice(delta: number): void {
-		this.choiceIndex = Math.max(0, Math.min(1, this.choiceIndex + (delta < 0 ? -1 : 1)));
+		this.choiceIndex = Math.max(0, Math.min(this.choiceCount() - 1, this.choiceIndex + (delta < 0 ? -1 : 1)));
 		this.tui.requestRender();
 	}
 
@@ -223,10 +244,11 @@ async function requestInfraApproval(
 	approvalDetails: ApprovalDetails,
 	reason: string,
 	command: string,
+	bypass?: BypassOffer,
 ): Promise<boolean> {
-	const approved = await ctx.ui.custom<boolean>(
-		(tui: TUI, theme: Theme, keybindings: KeybindingsManager, done: (approved: boolean) => void) =>
-			new InfraApprovalOverlay(tui, theme, keybindings, approvalDetails, reason, command, done),
+	const choice = await ctx.ui.custom<ApprovalChoice>(
+		(tui: TUI, theme: Theme, keybindings: KeybindingsManager, done: (choice: ApprovalChoice) => void) =>
+			new InfraApprovalOverlay(tui, theme, keybindings, approvalDetails, reason, command, bypass, done),
 		{
 			overlay: true,
 			overlayOptions: {
@@ -237,8 +259,11 @@ async function requestInfraApproval(
 			},
 		},
 	);
-	return approved === true;
+	if (choice === "bypass" && bypass) {
+		return bypass.onSelect((title, options) => ctx.ui.select(title, options));
+	}
+	return choice === "once";
 }
 
 export { requestInfraApproval };
-export type { ApprovalDetails };
+export type { ApprovalDetails, BypassOffer };

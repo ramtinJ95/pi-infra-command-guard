@@ -4,10 +4,13 @@ import {
 	DEFAULT_COMMAND_POLICY_SETTINGS,
 	hasEnabledGuards,
 	type CommandPolicySettings,
+	type GuardedExecutable,
 } from "./guarded-executables.ts";
 import { evaluateCommand, isInteractiveInterpreterCommand } from "./policy.ts";
+import { findMatchingBypassRule } from "./bypass.ts";
 
 const APPROVAL_STORE_KEY = Symbol.for("infra-command-guard.approval-store.v1");
+const BYPASS_STORE_KEY = Symbol.for("infra-command-guard.bypass-store.v1");
 const APPROVAL_TTL_MS = 10 * 60 * 1000;
 
 type GuardSource = "bash" | "exec-command" | "code-mode-exec-command";
@@ -27,6 +30,16 @@ interface PendingApproval {
 	reason: string;
 	createdAt: number;
 }
+
+type GuardBypassResult = {
+	executable: GuardedExecutable;
+	normalizedPrefix: string[];
+	cwd: string;
+};
+
+type GuardDecision =
+	| { allow: true }
+	| { allow: false; reason: string; requestId?: string | undefined; bypassInfo?: GuardBypassResult | undefined };
 
 function executionFingerprint(identity: ExecutionIdentity): string {
 	return JSON.stringify([
@@ -170,7 +183,11 @@ function guardExecution(
 	identity: ExecutionIdentity,
 	mode: string | undefined,
 	settings: CommandPolicySettings = DEFAULT_COMMAND_POLICY_SETTINGS,
-): { allow: true } | { allow: false; reason: string; requestId?: string | undefined } {
+	bypassStore?: {
+		isPaused(): boolean;
+		matches(executable: GuardedExecutable, cwd: string, args: readonly string[]): boolean;
+	},
+): GuardDecision {
 	if (hasEnabledGuards(settings.guards) && identity.tty && isInteractiveInterpreterCommand(identity.command)) {
 		return {
 			allow: false,
@@ -178,9 +195,17 @@ function guardExecution(
 				"BLOCKED — interactive shell and interpreter sessions are not supported by infra-command-guard because later write_stdin input cannot be classified reliably. Run a complete non-interactive command instead.",
 		};
 	}
+	if (bypassStore?.isPaused()) return { allow: true };
 	if (store.consume(identity)) return { allow: true };
 	const decision = evaluateCommand(identity.command, settings);
 	if (decision.allow) return { allow: true };
+	const bypassMatch = bypassStore ? findMatchingBypassRule(identity, settings) : undefined;
+	if (
+		bypassMatch &&
+		bypassStore?.matches(bypassMatch.executable, identity.cwd, bypassMatch.normalizedPrefix)
+	) {
+		return { allow: true };
+	}
 	if (mode !== "tui") {
 		return {
 			allow: false,
@@ -197,14 +222,24 @@ function guardExecution(
 		allow: false,
 		requestId: pending.id,
 		reason: formatApprovalRequest(decision.reason, identity.command, pending.id),
+		...(bypassMatch
+			? {
+					bypassInfo: {
+						executable: bypassMatch.executable,
+						normalizedPrefix: bypassMatch.normalizedPrefix,
+						cwd: identity.cwd,
+					},
+				}
+			: {}),
 	};
 }
 
 export {
 	APPROVAL_STORE_KEY,
+	BYPASS_STORE_KEY,
 	executionFingerprint,
 	executionIdentity,
 	ApprovalStore,
 	guardExecution,
 };
-export type { ExecutionIdentity, GuardSource };
+export type { ExecutionIdentity, GuardBypassResult, GuardDecision, GuardSource };

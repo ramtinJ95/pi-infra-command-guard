@@ -623,7 +623,11 @@ const TOOL_GLOBAL_OPTIONS = {
 } satisfies Record<GuardedExecutable, ToolGlobalOptions>;
 const COMMAND_LIKE_GLOBAL_OPTIONS = new Set(["-h", "--help", "-version", "--version"]);
 
-function normalizeOverrideArguments(executable: GuardedExecutable, args: string[]): string[] {
+function normalizeOverrideArguments(
+	executable: GuardedExecutable,
+	args: string[],
+	keptValueOptions?: ReadonlySet<string>,
+): string[] {
 	const options = TOOL_GLOBAL_OPTIONS[executable];
 	const normalized: string[] = [];
 	for (let index = 0; index < args.length; index += 1) {
@@ -638,6 +642,17 @@ function normalizeOverrideArguments(executable: GuardedExecutable, args: string[
 			continue;
 		}
 		if (options.value.has(name)) {
+			if (keptValueOptions?.has(name)) {
+				if (word.includes("=")) {
+					normalized.push(word);
+				} else {
+					const value = args[index + 1];
+					if (value === undefined) continue;
+					normalized.push(word, value);
+					index += 1;
+				}
+				continue;
+			}
 			if (!word.includes("=")) index += 1;
 			continue;
 		}

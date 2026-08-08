@@ -3,10 +3,17 @@ import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
 	APPROVAL_STORE_KEY,
+	BYPASS_STORE_KEY,
 	ApprovalStore,
 	executionIdentity,
 	guardExecution,
 } from "./approvals.ts";
+import {
+	DURATION_OPTIONS,
+	GuardBypassStore,
+	findMatchingBypassRule,
+	formatDuration,
+} from "./bypass.ts";
 import { requestInfraApproval } from "./approval-ui.ts";
 import { loadPolicySettings, requestApprovalAttention } from "./attention.ts";
 import {
@@ -16,9 +23,11 @@ import {
 import {
 	hasEnabledGuards,
 	type CommandPolicySettings,
+	type GuardedExecutable,
 } from "./guarded-executables.ts";
 
 const CODE_MODE_PUBLIC_TOOL_NAMES = new Set(["exec", "wait", "functions.exec", "functions.wait"]);
+const BYPASS_OFFER_FLAG = { flag: "Scoped bypass option", meaning: "bypass flag" };
 
 const ApproveInfraCommandParams = Type.Object({
 	request_id: Type.String({ description: "The approval request identifier from the blocked tool result." }),
@@ -38,9 +47,24 @@ const ApproveInfraCommandParams = Type.Object({
 export default function createExtension(pi: ExtensionAPI) {
 	const bashTool = createBashTool(process.cwd());
 	const approvals = new ApprovalStore();
+	const bypasses = new GuardBypassStore();
 	const events = pi.events as unknown as Record<PropertyKey, unknown>;
 	events[APPROVAL_STORE_KEY] = approvals;
+	events[BYPASS_STORE_KEY] = bypasses;
 	const currentApprovals = (): ApprovalStore => events[APPROVAL_STORE_KEY] as ApprovalStore;
+	const currentBypasses = (): GuardBypassStore => events[BYPASS_STORE_KEY] as GuardBypassStore;
+	let lastBypassState: string[] = [];
+	const syncBypassStatus = (context?: { ui?: ExtensionContext["ui"] }): void => {
+		const lines = currentBypasses().describe();
+		const changed =
+			lines.length !== lastBypassState.length ||
+			lines.some((line, index) => line !== lastBypassState[index]);
+		if (!changed) return;
+		lastBypassState = [...lines];
+		try {
+			context?.ui?.setStatus("infra-command-guard", lines.length > 0 ? lines.join(" | ") : undefined);
+		} catch {}
+	};
 	let lastConfigWarning: string | undefined;
 	let lastGuardRevision: string | undefined;
 	const currentPolicySettings = (context?: { ui?: ExtensionContext["ui"] }): CommandPolicySettings => {
@@ -70,6 +94,7 @@ export default function createExtension(pi: ExtensionAPI) {
 		const nestedContext = call.extensionContext;
 		const policySettings = currentPolicySettings(nestedContext);
 		if (!hasEnabledGuards(policySettings.guards)) return undefined;
+		syncBypassStatus(nestedContext);
 		const identity = executionIdentity(
 			"code-mode-exec-command",
 			call.input,
@@ -86,10 +111,60 @@ export default function createExtension(pi: ExtensionAPI) {
 			identity,
 			nestedContext?.mode,
 			policySettings,
+			currentBypasses(),
 		);
 		return guarded.allow ? undefined : { block: true, reason: guarded.reason };
 	};
 	const codeModeRegistration = registerCodeModeToolPreflight(pi, codeModeGuard);
+
+	pi.registerCommand("infra-guard", {
+		description: "Manage infra-command-guard pauses and scoped bypasses",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI || ctx.mode !== "tui") {
+				const lines = currentBypasses().describe();
+				ctx.ui.notify(
+					lines.length > 0 ? `infra-command-guard — ${lines.join(" | ")}` : "infra-command-guard — no active pauses or bypasses",
+					"info",
+				);
+				return;
+			}
+			const bypassStore = currentBypasses();
+			const paused = bypassStore.isPaused();
+			const active = bypassStore.describe().filter((line) => !paused || !line.startsWith("Guard paused"));
+			const pauseOption = paused ? "Resume guard now" : "Pause guard…";
+			const clearOption = "Clear all pauses and bypasses";
+			const options = [
+				...(active.length > 0 ? active.map((line) => `Bypass: ${line}`) : ["No active scoped bypasses"]),
+				pauseOption,
+				...(paused || active.length > 0 ? [clearOption] : []),
+			];
+			const choice = await ctx.ui.select("infra-command-guard", options);
+			if (!choice) return;
+			if (choice === pauseOption) {
+				if (paused) {
+					bypassStore.resume();
+					syncBypassStatus(ctx);
+					ctx.ui.notify("infra-command-guard resumed.", "info");
+					return;
+				}
+				const duration = await ctx.ui.select(
+					"Pause infra-command-guard for…",
+					DURATION_OPTIONS.map((option) => option.label),
+				);
+				const option = DURATION_OPTIONS.find((candidate) => candidate.label === duration);
+				if (!option) return;
+				bypassStore.pause(option.value);
+				syncBypassStatus(ctx);
+				ctx.ui.notify(`infra-command-guard paused for ${option.label}.`, "warning");
+				return;
+			}
+			if (choice === clearOption) {
+				bypassStore.clear();
+				syncBypassStatus(ctx);
+				ctx.ui.notify("All infra-command-guard pauses and bypasses cleared.", "info");
+			}
+		},
+	});
 
 	pi.registerCommand("infra-guard-notify-test", {
 		description: "Test infra-command-guard notification and sound configuration",
@@ -137,12 +212,63 @@ export default function createExtension(pi: ExtensionAPI) {
 				};
 			}
 
+			const blockedIdentity = executionIdentity("bash", { command: params.command }, ctx.cwd);
+			const bypassOffer = blockedIdentity
+				? findMatchingBypassRule(blockedIdentity, currentPolicySettings(ctx))
+				: undefined;
+			const bypassOfferConfig =
+				bypassOffer && blockedIdentity
+					? {
+						executable: bypassOffer.executable,
+						normalizedPrefix: bypassOffer.normalizedPrefix,
+						cwd: blockedIdentity.cwd,
+					}
+					: undefined;
+			const approvalDetails = bypassOfferConfig
+				? {
+					summary: params.summary,
+					flags: [
+						...params.flags,
+						{
+							...BYPASS_OFFER_FLAG,
+							meaning: `Choosing bypass trusts ${bypassOfferConfig.executable} ${bypassOfferConfig.normalizedPrefix.join(" ")} (and trailing arguments) without approval while this session runs in ${bypassOfferConfig.cwd} or its subdirectories, for the selected duration. Other directories and commands remain guarded.`,
+						},
+					],
+					blastRadius: params.blastRadius,
+				}
+				: { summary: params.summary, flags: params.flags, blastRadius: params.blastRadius };
+
 			await requestApprovalAttention(ctx);
 			const approved = await requestInfraApproval(
 				ctx,
-				{ summary: params.summary, flags: params.flags, blastRadius: params.blastRadius },
+				approvalDetails,
 				params.reason,
 				params.command,
+				bypassOfferConfig
+					? {
+						label: `Approve & bypass ${bypassOfferConfig.executable} ${bypassOfferConfig.normalizedPrefix.join(" ")} in this directory for…`,
+						onSelect: async (select) => {
+							const duration = await select(
+								"Bypass duration",
+								DURATION_OPTIONS.map((option) => option.label),
+							);
+							const option = DURATION_OPTIONS.find((candidate) => candidate.label === duration);
+							if (!option) return false;
+							currentBypasses().addRule(
+								bypassOfferConfig.executable,
+								bypassOfferConfig.cwd,
+								bypassOfferConfig.normalizedPrefix,
+								option.value,
+							);
+							syncBypassStatus(ctx);
+							ctx.ui.notify(
+								`Bypass active for ${formatDuration(option.value)}: ${bypassOfferConfig.executable} ${bypassOfferConfig.normalizedPrefix.join(" ")} in ${bypassOfferConfig.cwd}`,
+								"warning",
+							);
+							return true;
+						},
+					}
+					: undefined,
 			);
 			if (!approved) {
 				approvalStore.cancel(validation.pending.id);
@@ -167,6 +293,7 @@ export default function createExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", (event, ctx) => {
+		syncBypassStatus(ctx);
 		if (CODE_MODE_PUBLIC_TOOL_NAMES.has(event.toolName)) {
 			const policySettings = currentPolicySettings(ctx);
 			if (!hasEnabledGuards(policySettings.guards)) return undefined;
@@ -187,6 +314,7 @@ export default function createExtension(pi: ExtensionAPI) {
 			identity,
 			ctx.mode,
 			policySettings,
+			currentBypasses(),
 		);
 		return guarded.allow ? undefined : { block: true, reason: guarded.reason };
 	});
@@ -194,7 +322,8 @@ export default function createExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		...bashTool,
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
-			const identity = executionIdentity("bash", params, process.cwd());
+			syncBypassStatus(ctx);
+			const identity = executionIdentity("bash", params, ctx?.cwd ?? process.cwd());
 			if (!identity) return bashTool.execute(toolCallId, params, signal, onUpdate);
 			const policySettings = currentPolicySettings(ctx);
 			const guarded = guardExecution(
@@ -202,6 +331,7 @@ export default function createExtension(pi: ExtensionAPI) {
 				identity,
 				ctx.mode,
 				policySettings,
+				currentBypasses(),
 			);
 			if (!guarded.allow) throw new Error(guarded.reason);
 			return bashTool.execute(toolCallId, params, signal, onUpdate);
@@ -210,5 +340,6 @@ export default function createExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		if (events[APPROVAL_STORE_KEY] === approvals) delete events[APPROVAL_STORE_KEY];
+		if (events[BYPASS_STORE_KEY] === bypasses) delete events[BYPASS_STORE_KEY];
 	});
 }

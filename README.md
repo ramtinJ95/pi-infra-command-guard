@@ -171,6 +171,29 @@ Approvals expire after ten minutes. If the command, working directory, requested
 
 The request identifier is required. Missing, expired, or mismatched request identifiers are rejected; the blocked command must be rerun to create a fresh request.
 
+## Temporary pauses and scoped bypasses
+
+Two session-scoped escape hatches exist for focused work. Both live in memory only: they never persist to disk and never survive a `/reload`, an extension reload, or a Pi restart.
+
+### Pausing the guard
+
+Run `/infra-guard` and choose `Pause guard…`, then pick 10 minutes, 30 minutes, or 1 hour. While paused, every guarded command runs without approval except interactive TTY shell/interpreter sessions, which stay blocked because their later input cannot be classified. The same menu shows the remaining time, resumes the guard early, and clears everything. Active pauses and bypasses are also shown in the Pi status line.
+
+### Scoped bypasses from the approval overlay
+
+When a blocked command contains a single guarded invocation whose prefix identifies a target — for example `kubectl --kubeconfig ~/.config/staging/kubeconfig delete pod foo` — the approval overlay gains a third choice, `Approve & bypass … for…`. Picking a duration (10 minutes, 30 minutes, or 1 hour) approves the command and records a bypass rule for that session:
+
+- the rule is the invocation's normalized token prefix, including path-valued options such as `--kubeconfig` (with `~` expanded), so the target environment is part of the rule
+- trailing arguments are covered: bypassing the prefix above also covers `kubectl --kubeconfig ~/.config/staging/kubeconfig delete pod bar`
+- the rule only applies while the command runs in the blocked command's working directory or a subdirectory
+- commands the static policy already allows are never offered, and non-bypassable risks (`kubectl --raw`, `gcloud --flags-file`, Helm `--post-renderer`, invocation-local Git aliases) can never be bypassed
+- unparseable commands produce no bypass offer
+
+Bypass rules apply uniformly to the `bash` tool, direct `exec_command` calls, and Code Mode nested calls.
+
+> [!WARNING]
+> Pauses and bypasses deliberately weaken the guard. A pause exposes every guarded tool, and a scoped bypass still covers every trailing argument under its prefix — including other resources in the same cluster or namespace. Prefer the narrowest prefix and shortest duration that covers the task.
+
 ## Code Mode integration
 
 The integration registers an awaited nested-tool preflight through Pi's public cross-extension event bus. Code Mode resolves the JavaScript tool name and input first, then runs the guard before invoking `exec_command`, so commands assembled at runtime are covered without parsing the outer JavaScript source.

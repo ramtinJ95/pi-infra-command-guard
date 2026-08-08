@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { APPROVAL_STORE_KEY } from "./approvals.ts";
+import { APPROVAL_STORE_KEY, BYPASS_STORE_KEY } from "./approvals.ts";
 import {
 	PREFLIGHT_BROKER_AVAILABLE_CHANNEL,
 	PREFLIGHT_BROKER_REQUEST_CHANNEL,
@@ -193,6 +193,72 @@ test("approval requests do not leak across Pi 0.84 extension instances", async (
 	assert.match(result.content[0].text, /missing or expired/);
 });
 
+test("scoped bypasses apply across bash and exec_command paths within the stored cwd", async () => {
+	const events = createTestEventBus().facade();
+	const { handlers, pi, tools } = createHarness(events);
+	const toolCall = handlers.get("tool_call")![0]!;
+	const statuses: Array<string | undefined> = [];
+	const context = {
+		cwd: "/repo",
+		mode: "tui",
+		ui: { setStatus(_key: string, text: string | undefined) { statuses.push(text); } },
+	};
+	const bypassStore = (pi.events as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as {
+		addRule(executable: string, cwd: string, prefix: string[], durationMs: number): void;
+	};
+
+	const command = "kubectl --kubeconfig /tmp/kc delete pod foo";
+	const blocked = await toolCall({ toolName: "exec_command", input: { cmd: command } }, context) as {
+		block: boolean;
+		reason: string;
+	};
+	assert.equal(blocked.block, true);
+	assert.match(blocked.reason, /Approval request:/);
+
+	bypassStore.addRule("kubectl", "/repo", ["--kubeconfig", "/tmp/kc", "delete", "pod"], 10 * 60 * 1000);
+	assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: command } }, context), undefined);
+
+	const bash = tools.find((tool) => tool.name === "bash")!;
+	bypassStore.addRule("kubectl", "/repo", ["--kubeconfig", "/tmp/kc", "apply"], 10 * 60 * 1000);
+	await assert.rejects(
+		bash.execute("bypass-bash", { command: "kubectl --kubeconfig /tmp/kc apply -f x.yaml" }, undefined, undefined, context),
+		/error: stat \/tmp\/kc/,
+		"bypassed bash command reaches kubectl itself",
+	);
+
+	const otherDirectory = await toolCall(
+		{ toolName: "exec_command", input: { cmd: command } },
+		{ ...context, cwd: "/other" },
+	) as { block: boolean };
+	assert.equal(otherDirectory.block, true);
+	assert.ok(statuses.some((status) => status?.includes("kubectl")));
+});
+
+test("bypass state does not leak across extension instances", async () => {
+	const bus = createTestEventBus();
+	const first = createHarness(bus.facade());
+	const firstStore = (first.pi.events as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as {
+		pause(durationMs: number): void;
+		isPaused(): boolean;
+	};
+	firstStore.pause(10 * 60 * 1000);
+	assert.equal(firstStore.isPaused(), true);
+	for (const handler of first.handlers.get("session_shutdown") ?? []) await handler({}, {});
+
+	const second = createHarness(bus.facade());
+	const secondStore = (second.pi.events as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as {
+		isPaused(): boolean;
+	};
+	assert.equal(secondStore.isPaused(), false);
+	const toolCall = second.handlers.get("tool_call")![0]!;
+	const blocked = await toolCall(
+		{ toolName: "exec_command", input: { cmd: "rm after-shutdown" } },
+		{ cwd: "/tmp", mode: "tui", ui: {} },
+	) as { block: boolean };
+	assert.equal(blocked.block, true);
+	for (const handler of second.handlers.get("session_shutdown") ?? []) await handler({}, {});
+});
+
 test("extension reloads guard toggles and command rules for each command", async () => {
 	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-extension-"));
 	const configPath = join(directory, "infra-command-guard.json");
@@ -226,7 +292,7 @@ test("extension reloads guard toggles and command rules for each command", async
 		const store = (pi.events as Record<PropertyKey, unknown>)[APPROVAL_STORE_KEY] as { approve: (...args: string[]) => { ok: boolean } };
 		assert.equal(store.approve(requestId, "rm enabled", "rm command needs confirmation").ok, true);
 
-		const searchCommand = "rg kubectl README.md";
+		const searchCommand = "grep kubectl README.md";
 		writeFileSync(configPath, JSON.stringify({}));
 		const conservativeSearch = await toolCall(
 			{ toolName: "exec_command", input: { cmd: searchCommand } },
@@ -300,7 +366,7 @@ test("Code Mode reloads guard toggles and command rules without losing preflight
 		assert.equal(terraform?.block, true);
 		assert.match(terraform?.reason ?? "", /terraform apply is not on the low-risk allowlist/);
 
-		const searchCommand = "rg kubectl README.md";
+		const searchCommand = "grep kubectl README.md";
 		writeFileSync(configPath, JSON.stringify({ guardUnclassifiedCommands: false }));
 		assert.equal(await preflight(nestedCall(searchCommand)), undefined);
 		writeFileSync(configPath, JSON.stringify({ guardUnclassifiedCommands: true }));

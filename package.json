@@ -34,6 +34,7 @@
     "extensions/infra-command-guard/approval-ui.ts",
     "extensions/infra-command-guard/approvals.ts",
     "extensions/infra-command-guard/attention.ts",
+    "extensions/infra-command-guard/bypass.ts",
     "extensions/infra-command-guard/code-mode.ts",
     "extensions/infra-command-guard/guarded-executables.ts",
     "extensions/infra-command-guard/policy.ts",
