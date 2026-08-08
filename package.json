@@ -1,6 +1,6 @@
 {
   "name": "@ramtinj95/pi-infra-command-guard",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Approval guard for risky infrastructure, cloud, container, repository, secret, and local file commands in Pi and GPT-5.6 Code Mode",
   "type": "module",
   "license": "MIT",
