@@ -292,7 +292,7 @@ test("extension reloads guard toggles and command rules for each command", async
 		const store = (pi.events as Record<PropertyKey, unknown>)[APPROVAL_STORE_KEY] as { approve: (...args: string[]) => { ok: boolean } };
 		assert.equal(store.approve(requestId, "rm enabled", "rm command needs confirmation").ok, true);
 
-		const searchCommand = "rg kubectl README.md";
+		const searchCommand = "grep kubectl README.md";
 		writeFileSync(configPath, JSON.stringify({}));
 		const conservativeSearch = await toolCall(
 			{ toolName: "exec_command", input: { cmd: searchCommand } },
@@ -366,7 +366,7 @@ test("Code Mode reloads guard toggles and command rules without losing preflight
 		assert.equal(terraform?.block, true);
 		assert.match(terraform?.reason ?? "", /terraform apply is not on the low-risk allowlist/);
 
-		const searchCommand = "rg kubectl README.md";
+		const searchCommand = "grep kubectl README.md";
 		writeFileSync(configPath, JSON.stringify({ guardUnclassifiedCommands: false }));
 		assert.equal(await preflight(nestedCall(searchCommand)), undefined);
 		writeFileSync(configPath, JSON.stringify({ guardUnclassifiedCommands: true }));
