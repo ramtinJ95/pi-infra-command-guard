@@ -212,12 +212,10 @@ export default function createExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			const blockedIdentity = executionIdentity("bash", { command: params.command }, ctx.cwd);
-			const bypassOffer = blockedIdentity
-				? findMatchingBypassRule(blockedIdentity, currentPolicySettings(ctx))
-				: undefined;
+			const blockedIdentity = validation.pending.identity;
+			const bypassOffer = findMatchingBypassRule(blockedIdentity, currentPolicySettings(ctx));
 			const bypassOfferConfig =
-				bypassOffer && blockedIdentity
+				bypassOffer
 					? {
 						executable: bypassOffer.executable,
 						normalizedPrefix: bypassOffer.normalizedPrefix,
@@ -239,7 +237,7 @@ export default function createExtension(pi: ExtensionAPI) {
 				: { summary: params.summary, flags: params.flags, blastRadius: params.blastRadius };
 
 			await requestApprovalAttention(ctx);
-			const approved = await requestInfraApproval(
+			const approvalChoice = await requestInfraApproval(
 				ctx,
 				approvalDetails,
 				params.reason,
@@ -270,11 +268,24 @@ export default function createExtension(pi: ExtensionAPI) {
 					}
 					: undefined,
 			);
-			if (!approved) {
+			if (approvalChoice === "cancel") {
 				approvalStore.cancel(validation.pending.id);
 				return {
 					content: [{ type: "text", text: "User cancelled. Do not retry the command." }],
 					details: { approved: false, requestId: validation.pending.id, reason: params.reason, command: params.command },
+				};
+			}
+			if (approvalChoice === "bypass") {
+				approvalStore.clear();
+				return {
+					content: [{ type: "text", text: "Bypass active. Retry the exact same command with the same execution context now." }],
+					details: {
+						approved: true,
+						bypass: true,
+						requestId: validation.pending.id,
+						reason: params.reason,
+						command: params.command,
+					},
 				};
 			}
 
