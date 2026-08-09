@@ -104,14 +104,37 @@ test("findMatchingBypassRule matches through wrappers and compound segments", ()
 	assert.deepEqual(match.scope, { kind: "kubectl-kubeconfig", path: "/tmp/kc" });
 });
 
-test("ambiguous or dynamic kubeconfig values retain narrow command-prefix scope", () => {
+test("ambiguous or dynamic kubeconfig values receive no bypass offer", () => {
 	for (const command of [
 		"kubectl --kubeconfig /tmp/first --kubeconfig /tmp/second delete pod foo",
 		'kubectl --kubeconfig "$OTHER_HOME/kc" delete pod foo',
 	]) {
 		const match = findMatchingBypassRule(executionIdentity("bash", { command }, "/repo")!, SETTINGS);
-		assert.equal(match?.scope.kind, "command-prefix", command);
+		assert.equal(match, undefined, command);
 	}
+});
+
+test("kubeconfig scope rejects HOME overrides and uncertain effective cwd", () => {
+	for (const command of [
+		'HOME=/other kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'env HOME=/other kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		"cd /other && kubectl --kubeconfig relative/kc delete pod foo",
+		"pushd /other && kubectl --kubeconfig relative/kc delete pod foo",
+		"env -C /other kubectl --kubeconfig relative/kc delete pod foo",
+		"sudo -D /other kubectl --kubeconfig relative/kc delete pod foo",
+	]) {
+		assert.equal(
+			findMatchingBypassRule(executionIdentity("bash", { command }, "/repo")!, SETTINGS),
+			undefined,
+			command,
+		);
+	}
+});
+
+test("kubectl option scanning stops at the argument terminator", () => {
+	const command = "kubectl delete pod foo -- --kubeconfig /tmp/not-an-option";
+	const match = findMatchingBypassRule(executionIdentity("bash", { command }, "/repo")!, SETTINGS);
+	assert.equal(match?.scope.kind, "command-prefix");
 });
 
 test("findMatchingBypassRule refuses compound commands with multiple guarded risks", () => {

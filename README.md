@@ -177,7 +177,7 @@ Two session-scoped escape hatches exist for focused work. Both live in memory on
 
 ### Pausing the guard
 
-Run `/infra-guard` and choose `Pause guard…`, then pick 10 minutes, 30 minutes, or 1 hour. While paused, every guarded command runs without approval except interactive TTY shell/interpreter sessions, which stay blocked because their later input cannot be classified. The same menu resumes the guard early, removes individual scoped bypasses, and clears multiple active exceptions together. Active pauses and bypasses are also shown in the Pi status line.
+Run `/infra-guard` and choose `Pause guard…`, then pick 10 minutes, 30 minutes, or 1 hour. While paused, every guarded command runs without approval except interactive TTY shell/interpreter sessions, which stay blocked because their later input cannot be classified. This intentionally includes capabilities that scoped bypasses cannot cover, such as `kubectl --raw`; pausing is the operator-controlled full off switch for the selected duration. The same menu resumes the guard early, removes individual scoped bypasses, and clears multiple active exceptions together. Active pauses and bypasses are also shown in the Pi status line.
 
 ### Scoped bypasses from the approval overlay
 
@@ -187,6 +187,7 @@ When a blocked command contains a single guarded invocation whose target can be 
 - kubeconfig paths normalize relative components plus `~`, `$HOME`, and `${HOME}` forms, so equivalent references identify the same environment
 - a different kubeconfig or a kubectl command with no explicit kubeconfig remains guarded; the rule does not infer inherited `KUBECONFIG` or current-context state
 - other bypassable invocations, including kubectl commands without an explicit kubeconfig, retain narrow normalized command-prefix scope: existing tokens cannot change, though trailing arguments are covered
+- ambiguous, repeated, dynamic, or cwd-uncertain kubeconfig forms receive no bypass offer rather than falling back to a weaker scope
 - the rule only applies while the command runs in the blocked command's working directory or a subdirectory
 - commands the static policy already allows are never offered, and non-bypassable risks (`kubectl --raw`, `gcloud --flags-file`, Helm `--post-renderer`, invocation-local Git aliases) can never be bypassed
 - unparseable commands and compound commands with more than one guarded or unclassified operation produce no bypass offer

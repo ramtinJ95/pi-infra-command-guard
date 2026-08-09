@@ -52,6 +52,11 @@ type MatchingInvocation = {
 	scope: BypassScope;
 };
 
+type KubectlKubeconfigResult =
+	| { kind: "absent" }
+	| { kind: "invalid" }
+	| { kind: "scope"; scope: BypassScope & { kind: "kubectl-kubeconfig" } };
+
 function formatDuration(durationMs: number): string {
 	const option = DURATION_OPTIONS.find((candidate) => candidate.value === durationMs);
 	if (option) return option.label;
@@ -180,6 +185,10 @@ function scopesEqual(left: BypassScope, right: BypassScope): boolean {
 	return false;
 }
 
+function sameBypassScope(left: BypassScope, right: BypassScope): boolean {
+	return scopesEqual(left, right);
+}
+
 function scopeMatches(rule: BypassScope, candidate: BypassScope): boolean {
 	if (rule.kind !== candidate.kind) return false;
 	if (rule.kind === "kubectl-kubeconfig" && candidate.kind === "kubectl-kubeconfig") {
@@ -232,10 +241,15 @@ function normalizeBypassTokens(executable: GuardedExecutable, args: readonly str
 	});
 }
 
-function kubectlKubeconfigScope(args: readonly string[], cwd: string): BypassScope | undefined {
+function kubectlKubeconfigScope(
+	args: readonly string[],
+	cwd: string,
+	homeOverride: boolean,
+): KubectlKubeconfigResult {
 	let value: string | undefined;
 	for (let index = 0; index < args.length; index += 1) {
 		const token = args[index];
+		if (token === "--") break;
 		let candidate: string | undefined;
 		if (token === "--kubeconfig") {
 			candidate = args[index + 1];
@@ -244,13 +258,33 @@ function kubectlKubeconfigScope(args: readonly string[], cwd: string): BypassSco
 			candidate = token.slice("--kubeconfig=".length);
 		}
 		if (candidate === undefined) continue;
-		if (value !== undefined || candidate.length === 0) return undefined;
+		if (value !== undefined || candidate.length === 0) return { kind: "invalid" };
 		value = candidate;
 	}
-	if (value === undefined) return undefined;
+	if (value === undefined) return { kind: "absent" };
+	if (isHomeReference(value) && homeOverride) return { kind: "invalid" };
 	const expanded = expandHomePath(value);
-	if (expanded.startsWith("~") || expanded.includes("$") || expanded.includes("\0")) return undefined;
-	return { kind: "kubectl-kubeconfig", path: resolve(cwd, expanded) };
+	if (expanded.startsWith("~") || expanded.includes("$") || expanded.includes("\0")) return { kind: "invalid" };
+	return { kind: "scope", scope: { kind: "kubectl-kubeconfig", path: resolve(cwd, expanded) } };
+}
+
+function isHomeReference(value: string): boolean {
+	return value === "$HOME" || value === "${HOME}" || value.startsWith("$HOME/") || value.startsWith("${HOME}/");
+}
+
+function hasHomeOverride(words: readonly string[]): boolean {
+	return words.some((word) => /^HOME=/.test(word));
+}
+
+function hasCwdChangingWrapper(invocation: Invocation, segmentWords: readonly string[]): boolean {
+	if (!invocation.rawExecutable) return false;
+	const executableIndex = segmentWords.indexOf(invocation.rawExecutable);
+	if (executableIndex <= 0) return false;
+	const wrapperWords = segmentWords.slice(0, executableIndex);
+	return wrapperWords.some((word) => {
+		const name = word.includes("=") ? word.slice(0, word.indexOf("=")) : word;
+		return name === "-C" || name === "-D" || name === "--chdir";
+	});
 }
 
 function invocationBypassCandidate(
@@ -258,6 +292,7 @@ function invocationBypassCandidate(
 	invocation: Invocation,
 	settings: CommandPolicySettings,
 	cwd: string,
+	homeOverride: boolean,
 ): MatchingInvocation | undefined {
 	const guardSettings = settings.guards;
 	if (!guardSettings[executable]) return undefined;
@@ -265,8 +300,12 @@ function invocationBypassCandidate(
 	if (decision.allow) return undefined;
 	const nonBypassable = evaluateNonBypassableRisk(executable, invocation);
 	if (nonBypassable && nonBypassable.basis !== "unclassified") return undefined;
-	const environmentScope = executable === "kubectl" ? kubectlKubeconfigScope(invocation.args, cwd) : undefined;
-	if (environmentScope) return { executable, scope: environmentScope };
+	if (homeOverride && invocation.args.some(isHomeReference)) return undefined;
+	if (executable === "kubectl") {
+		const kubeconfig = kubectlKubeconfigScope(invocation.args, cwd, homeOverride);
+		if (kubeconfig.kind === "invalid") return undefined;
+		if (kubeconfig.kind === "scope") return { executable, scope: kubeconfig.scope };
+	}
 	const normalizedPrefix = normalizeBypassTokens(executable, invocation.args);
 	if (normalizedPrefix.length === 0) return undefined;
 	return { executable, scope: { kind: "command-prefix", tokens: normalizedPrefix } };
@@ -279,13 +318,21 @@ function findMatchingBypassRule(
 	const parsed = parseSimpleCommands(identity.command);
 	if ("error" in parsed) return undefined;
 	const candidates: MatchingInvocation[] = [];
+	let cwdUncertain = false;
+	let homeOverride = false;
 	for (const segment of parsed.segments) {
-		if (evaluateCommand(segment.bare, settings).allow) continue;
 		const invocation = extractInvocation(segment.words);
 		if ("error" in invocation || !invocation.executable) return undefined;
+		homeOverride ||= hasHomeOverride(segment.words);
+		const segmentChangesCwd = invocation.executable === "cd" || invocation.executable === "pushd" || invocation.executable === "popd";
+		if (evaluateCommand(segment.bare, settings).allow) {
+			cwdUncertain ||= segmentChangesCwd;
+			continue;
+		}
+		if (cwdUncertain || segmentChangesCwd || hasCwdChangingWrapper(invocation, segment.words)) return undefined;
 		const executable = invocation.executable as GuardedExecutable;
 		if (!(BYPASSABLE_EXECUTABLES as readonly string[]).includes(executable)) return undefined;
-		const match = invocationBypassCandidate(executable, invocation, settings, identity.cwd);
+		const match = invocationBypassCandidate(executable, invocation, settings, identity.cwd, homeOverride);
 		if (!match) return undefined;
 		candidates.push(match);
 	}
@@ -304,5 +351,6 @@ export {
 	findMatchingBypassRule,
 	formatDuration,
 	isPathWithin,
+	sameBypassScope,
 };
 export type { BypassRule, BypassScope, MatchingInvocation };
