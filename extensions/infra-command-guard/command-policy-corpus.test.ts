@@ -200,9 +200,11 @@ const GIT_APPROVALS = [
 	"git tag -d release-1",
 	"git tag --delete release-1",
 	'git stash drop "stash@{0}"',
+	"git stash drop stash@{0}",
 	"git stash clear",
 	"git reflog expire --expire=now --all",
 	'git reflog delete "HEAD@{1}"',
+	"git reflog delete HEAD@{1}",
 	"git worktree remove --force ../dirty-tree",
 	"git worktree remove -f ../dirty-tree",
 	"git gc --prune=now",
@@ -232,8 +234,6 @@ const GIT_APPROVALS = [
 	"git --config-env=alias.deploy=DEPLOY_ALIAS deploy",
 ];
 const GIT_UNCLASSIFIED = [
-	"git stash drop stash@{0}",
-	"git reflog delete HEAD@{1}",
 	"git --future-global-option status",
 ];
 

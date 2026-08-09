@@ -1,3 +1,4 @@
+import { parse, type Command, type ParsedScript, type Word } from "unbash";
 import { GUARDED_EXECUTABLES } from "./guarded-executables.ts";
 
 const GUARDED_PATTERNS = new Map<string, RegExp>();
@@ -7,6 +8,11 @@ type ShellSegment = { words: string[]; rawWords: string[]; bare: string };
 type ParsedCommands =
 	| { segments: ShellSegment[]; error?: undefined }
 	| { segments?: undefined; error: string };
+type RecoveredCommands = {
+	segments: ShellSegment[];
+	errors: string[];
+	hasDynamicExecutable: boolean;
+};
 type OptionClassification = "boolean" | "value" | "unknown";
 type ConsumedOptions =
 	| { index: number; error?: undefined }
@@ -150,12 +156,90 @@ function containsGuardedText(
 function hasDynamicExecutable(command: string): boolean {
 	if (!String(command || "").includes("$")) return false;
 	const parsed = parseSimpleCommands(command);
-	if ("error" in parsed) return false;
-	for (const segment of parsed.segments) {
+	const segments = requiresAstRecovery(parsed)
+		? recoverAstCommands(command).segments
+		: ("error" in parsed ? [] : parsed.segments);
+	for (const segment of segments) {
 		const invocation = extractInvocation(segment.words);
 		if (!("error" in invocation) && invocation.executable?.includes("$")) return true;
 	}
 	return false;
+}
+
+function requiresAstRecovery(parsed: ParsedCommands): boolean {
+	if ("error" in parsed) return true;
+	return parsed.segments.some((segment) => {
+		const invocation = extractInvocation(segment.words);
+		return !("error" in invocation) && invocation.executable !== null && SHELL_CONTROL_KEYWORDS.has(invocation.executable);
+	});
+}
+
+function unquotedWordText(word: Word): string {
+	if (!word.parts) return word.value;
+	return word.parts
+		.filter((part) => part.type === "Literal")
+		.map((part) => part.value)
+		.join("");
+}
+
+function commandSegment(command: Command): ShellSegment | undefined {
+	if (!command.name) return undefined;
+	const prefixWords = command.prefix.map((assignment) => assignment.text);
+	const commandWords = [command.name, ...command.suffix];
+	return {
+		words: [...prefixWords, ...commandWords.map((word) => word.value)],
+		rawWords: [...prefixWords, ...commandWords.map((word) => word.text)],
+		bare: [...prefixWords, ...commandWords.map(unquotedWordText)].join(" "),
+	};
+}
+
+/**
+ * Recover executable command nodes from Bash syntax that the provenance parser
+ * deliberately does not support. unbash supplies the structural AST; argv and
+ * wrapper normalization remain owned by the existing parser helpers.
+ */
+function recoverAstCommands(command: string): RecoveredCommands {
+	const segments: ShellSegment[] = [];
+	const errors: string[] = [];
+	let hasDynamic = false;
+	const seen = new WeakSet<object>();
+
+	const visit = (value: unknown): void => {
+		if (!value || typeof value !== "object" || seen.has(value)) return;
+		seen.add(value);
+		const record = value as Record<string, unknown>;
+
+		if (record.type === "Command") {
+			const shellCommand = value as Command;
+			const segment = commandSegment(shellCommand);
+			if (segment) {
+				segments.push(segment);
+				const invocation = extractInvocation(segment.words);
+				if (!("error" in invocation) && invocation.executable?.includes("$")) hasDynamic = true;
+			}
+		}
+
+		if (record.type === "Script") {
+			for (const error of (value as ParsedScript).errors ?? []) {
+				errors.push(`${error.message} at offset ${error.pos}`);
+			}
+		}
+
+		// Word parts are lazy and intentionally absent from Object.keys(). Reading
+		// them is required to reach substitutions in words and expandable heredocs.
+		if ("parts" in record && Array.isArray(record.parts)) visit(record.parts);
+		for (const key of Object.keys(record)) {
+			if (key !== "parts") visit(record[key]);
+		}
+	};
+
+	try {
+		visit(parse(command));
+	} catch (error) {
+		errors.push(error instanceof Error ? error.message : String(error));
+	}
+
+	return { segments, errors, hasDynamicExecutable: hasDynamic };
 }
 
 function matchesLeadingOption(option: string, knownSet: ReadonlySet<string>): boolean {
@@ -604,9 +688,11 @@ export {
 	normalizeForInfraScan,
 	containsGuardedText,
 	hasDynamicExecutable,
+	requiresAstRecovery,
+	recoverAstCommands,
 	parseSimpleCommands,
 	extractInvocation,
 	collectPositionals,
 	isInteractiveInterpreterCommand,
 };
-export type { Invocation, InvocationResult, ParsedCommands, ShellSegment };
+export type { Invocation, InvocationResult, ParsedCommands, RecoveredCommands, ShellSegment };

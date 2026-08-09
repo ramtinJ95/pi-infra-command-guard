@@ -6,6 +6,8 @@ import {
 	extractInvocation,
 	hasDynamicExecutable,
 	parseSimpleCommands,
+	recoverAstCommands,
+	requiresAstRecovery,
 	type Invocation,
 } from "./shell.ts";
 import {
@@ -199,14 +201,24 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 	) return allow();
 
 	const parsed = parseSimpleCommands(command);
-	if ("error" in parsed) {
-		return unclassified(`This command uses shell syntax the infra guard cannot classify safely (${parsed.error})`);
+	const recovered = requiresAstRecovery(parsed) ? recoverAstCommands(command) : undefined;
+	if (recovered) {
+		const astDiagnostic = recovered.errors[0] ? `; Bash AST diagnostic: ${recovered.errors[0]}` : "";
+		uncertainty ??= unclassified(
+			"error" in parsed
+				? `This command uses shell syntax outside the infra guard's provenance parser (${parsed.error}${astDiagnostic})`
+				: `This command uses shell control flow outside the infra guard's provenance parser${astDiagnostic}`,
+		);
+		if (recovered.hasDynamicExecutable) {
+			uncertainty = unclassified("This command resolves its executable through a shell expansion, which requires manual approval");
+		}
 	}
+	const segments = recovered?.segments ?? ("error" in parsed ? [] : parsed.segments);
 	const enabledIndirectTextGuards = enabledExecutables === GUARDED_EXECUTABLES
 		? DEFAULT_ENABLED_INDIRECT_TEXT_GUARDS
 		: enabledExecutables.filter((executable) => INDIRECT_TEXT_GUARDS.has(executable));
 
-	for (const segment of parsed.segments) {
+	for (const segment of segments) {
 		const invocation = extractInvocation(segment.words);
 		if ("error" in invocation) {
 			uncertainty ??= unclassified(`This command uses a wrapper the infra guard cannot classify safely (${invocation.error})`);

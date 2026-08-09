@@ -29,6 +29,9 @@
     "vault",
     "approval"
   ],
+  "dependencies": {
+    "unbash": "^4.0.10"
+  },
   "files": [
     "CHANGELOG.md",
     "extensions/infra-command-guard/index.ts",
@@ -73,6 +76,7 @@
   },
   "scripts": {
     "benchmark:policy": "bun extensions/infra-command-guard/policy.bench.ts",
+    "test:ast-generated": "bun extensions/infra-command-guard/bash-ast-recovery.test.ts",
     "test": "bun extensions/infra-command-guard/index.test.ts",
     "typecheck": "tsc",
     "test:package": "npm pack --dry-run",
