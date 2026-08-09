@@ -14,6 +14,7 @@ import {
 	describeBypassScope,
 	findMatchingBypassRule,
 	formatDuration,
+	sameBypassScope,
 } from "./bypass.ts";
 import { requestInfraApproval } from "./approval-ui.ts";
 import { loadPolicySettings, requestApprovalAttention } from "./attention.ts";
@@ -132,13 +133,16 @@ export default function createExtension(pi: ExtensionAPI) {
 			const bypassStore = currentBypasses();
 			const paused = bypassStore.isPaused();
 			const activeRules = bypassStore.listRules();
-			const removeOptions = activeRules.map((rule) => `Remove bypass: ${bypassStore.describeRule(rule)}`);
+			const removeOptions = activeRules.map((rule, index) => ({
+				label: `Remove bypass ${index + 1}: ${bypassStore.describeRule(rule)}`,
+				rule,
+			}));
 			const pauseOption = paused ? "Resume guard now" : "Pause guard…";
 			const clearOption = "Clear all pauses and bypasses";
 			const activeCount = (paused ? 1 : 0) + activeRules.length;
 			const options = [
 				pauseOption,
-				...removeOptions,
+				...removeOptions.map((option) => option.label),
 				...(activeCount > 1 ? [clearOption] : []),
 			];
 			const choice = await ctx.ui.select("infra-command-guard", options);
@@ -163,10 +167,10 @@ export default function createExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(`infra-command-guard paused for ${option.label}.`, "warning");
 				return;
 			}
-			const removeIndex = removeOptions.indexOf(choice);
-			if (removeIndex !== -1) {
-				const rule = activeRules[removeIndex];
-				if (!rule || !bypassStore.removeRule(rule)) return;
+			const removal = removeOptions.find((option) => option.label === choice);
+			if (removal) {
+				const { rule } = removal;
+				if (!bypassStore.removeRule(rule)) return;
 				currentApprovals().clear();
 				syncBypassStatus(ctx);
 				ctx.ui.notify(`Removed bypass: ${describeBypassScope(rule.executable, rule.scope)} in ${rule.cwd}`, "info");
@@ -272,6 +276,25 @@ export default function createExtension(pi: ExtensionAPI) {
 							);
 							const option = DURATION_OPTIONS.find((candidate) => candidate.label === duration);
 							if (!option) return false;
+							const refreshedSettings = currentPolicySettings(ctx);
+							const refreshedValidation = approvalStore.validate(
+								validation.pending.id,
+								params.command,
+								params.reason,
+							);
+							const refreshedOffer = refreshedValidation.ok
+								? findMatchingBypassRule(refreshedValidation.pending.identity, refreshedSettings)
+								: undefined;
+							if (
+								!refreshedValidation.ok ||
+								!refreshedOffer ||
+								refreshedOffer.executable !== bypassOfferConfig.executable ||
+								refreshedValidation.pending.identity.cwd !== bypassOfferConfig.cwd ||
+								!sameBypassScope(refreshedOffer.scope, bypassOfferConfig.scope)
+							) {
+								ctx.ui.notify("Bypass request expired or changed. Run the blocked command again.", "warning");
+								return false;
+							}
 							currentBypasses().addRule(
 								bypassOfferConfig.executable,
 								bypassOfferConfig.cwd,

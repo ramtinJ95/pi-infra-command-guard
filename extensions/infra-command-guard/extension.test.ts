@@ -199,11 +199,24 @@ test("infra-guard menu pauses, resumes, and removes individual bypasses without 
 		) as { block: boolean };
 		assert.equal(blocked.block, true);
 
-		bypasses.addRule("kubectl", "/repo", { kind: "command-prefix", tokens: ["delete", "pod", "api"] }, 10 * 60 * 1000);
-		const removeOption = `Remove bypass: ${bypasses.describeRule(bypasses.listRules()[0]!)}`;
-		await runMenu([removeOption], (_title, options) => {
-			assert.deepEqual(options, ["Pause guard…", removeOption]);
+		bypasses.addRule("kubectl", "/repo", { kind: "command-prefix", tokens: ["delete pod", "api"] }, 10 * 60 * 1000);
+		bypasses.addRule("kubectl", "/repo", { kind: "command-prefix", tokens: ["delete", "pod api"] }, 10 * 60 * 1000);
+		const [firstRule, secondRule] = bypasses.listRules();
+		assert.ok(firstRule);
+		assert.ok(secondRule);
+		assert.equal(bypasses.describeRule(firstRule), bypasses.describeRule(secondRule));
+		const firstRemoveOption = `Remove bypass 1: ${bypasses.describeRule(firstRule)}`;
+		const secondRemoveOption = `Remove bypass 2: ${bypasses.describeRule(secondRule)}`;
+		await runMenu([secondRemoveOption], (_title, options) => {
+			assert.deepEqual(options, [
+				"Pause guard…",
+				firstRemoveOption,
+				secondRemoveOption,
+				"Clear all pauses and bypasses",
+			]);
 		});
+		assert.deepEqual(bypasses.listRules(), [firstRule]);
+		await runMenu([firstRemoveOption]);
 		assert.deepEqual(bypasses.listRules(), []);
 		assert.match(notifications.at(-1) ?? "", /Removed bypass/);
 		assert.ok(statuses.length > 0);
@@ -305,6 +318,72 @@ test("approval-overlay bypass keeps the blocked command cwd and does not leave a
 			{ cwd: "/different-approval-tool-cwd", mode: "tui" },
 		) as { block: boolean };
 		assert.equal(outside.block, true);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test("bypass creation revalidates pending authority after duration selection", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-stale-bypass-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = directory;
+	try {
+		const events = createTestEventBus().facade();
+		const { handlers, pi, tools } = createHarness(events);
+		const command = "kubectl --kubeconfig /tmp/kc delete pod api";
+		const blocked = await handlers.get("tool_call")![0]!(
+			{ toolName: "exec_command", input: { cmd: command } },
+			{ cwd: "/repo", mode: "tui" },
+		) as { reason: string };
+		const requestId = blocked.reason.match(/Approval request: ([^\n]+)/)?.[1];
+		const reason = blocked.reason.match(/^BLOCKED — ([^\n]+)/)?.[1];
+		assert.ok(requestId);
+		assert.ok(reason);
+		const approvals = (pi.events as unknown as Record<PropertyKey, unknown>)[APPROVAL_STORE_KEY] as ApprovalStore;
+		const bypasses = (pi.events as unknown as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as GuardBypassStore;
+		const notifications: string[] = [];
+		const approve = tools.find((tool) => tool.name === "approve_infra_command")!;
+		const result = await approve.execute(
+			"approve-stale-bypass",
+			{
+				request_id: requestId,
+				command,
+				reason,
+				summary: "Delete one test pod.",
+				flags: [],
+				blastRadius: "The named pod is removed.",
+			},
+			new AbortController().signal,
+			undefined,
+			{
+				cwd: "/repo",
+				mode: "tui",
+				ui: {
+					async custom(factory: (...args: any[]) => { handleInput(data: string): void }) {
+						let choice = "cancel";
+						const overlay = factory(
+							{ requestRender() {} },
+							{},
+							{ matches: () => false },
+							(selected: string) => { choice = selected; },
+						);
+						overlay.handleInput("b");
+						return choice;
+					},
+					async select() {
+						approvals.clear();
+						return "10 minutes";
+					},
+					notify(message: string) { notifications.push(message); },
+					setStatus() {},
+				},
+			},
+		);
+		assert.equal(result.details.approved, false);
+		assert.deepEqual(bypasses.listRules(), []);
+		assert.match(notifications.at(-1) ?? "", /expired or changed/);
 	} finally {
 		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
