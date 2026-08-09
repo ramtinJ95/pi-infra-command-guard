@@ -61,6 +61,10 @@ test("shell parsing preserves raw quote and escape provenance", () => {
 	assert.deepEqual(parsed.segments[0].rawWords, ["kubectl", "--kubeconfig", '"$HOME/kc"', "delete", "pod", "a"]);
 	assert.deepEqual(parsed.segments[1].words, ["kubectl", "--kubeconfig", "~/literal", "delete", "pod", "b"]);
 	assert.deepEqual(parsed.segments[1].rawWords, ["kubectl", "--kubeconfig", "\\~/literal", "delete", "pod", "b"]);
+	const ordinaryBackslash = parseSimpleCommands(String.raw`kubectl --kubeconfig "/tmp/\q" delete pod c`);
+	assert.ok(!("error" in ordinaryBackslash));
+	assert.equal(ordinaryBackslash.segments[0].words[2], String.raw`/tmp/\q`);
+	assert.equal(ordinaryBackslash.segments[0].rawWords[2], String.raw`"/tmp/\q"`);
 });
 
 test("semantics-preserving shell variations cannot hide guarded mutations", () => {

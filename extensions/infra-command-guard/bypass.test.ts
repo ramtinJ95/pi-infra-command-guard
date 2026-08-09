@@ -20,6 +20,8 @@ test("expandHomePath expands home-directory path forms", () => {
 	assert.equal(expandHomePath("~/config/kc"), `${homedir()}/config/kc`);
 	assert.equal(expandHomePath("$HOME/config/kc"), `${homedir()}/config/kc`);
 	assert.equal(expandHomePath("${HOME}/config/kc"), `${homedir()}/config/kc`);
+	assert.equal(expandHomePath("~//config/kc"), `${homedir()}/config/kc`);
+	assert.equal(expandHomePath("$HOME//config/kc"), `${homedir()}/config/kc`);
 	assert.equal(expandHomePath("/etc/hosts"), "/etc/hosts");
 	assert.equal(expandHomePath("~other/file"), "~other/file");
 });
@@ -100,7 +102,6 @@ test("kubeconfig normalization follows shell expansion provenance", () => {
 		"kubectl --kubeconfig \\~/kc delete pod foo",
 		"kubectl --kubeconfig=~/kc delete pod foo",
 		"kubectl --kubeconfig '$HOME/kc' delete pod foo",
-		'kubectl --kubeconfig="$HOME/kc" delete pod foo',
 	]) {
 		assert.equal(
 			findMatchingBypassRule(executionIdentity("bash", { command }, "/repo")!, SETTINGS),
@@ -114,10 +115,19 @@ test("kubeconfig normalization follows shell expansion provenance", () => {
 		"kubectl --kubeconfig=/tmp/kc delete pod foo",
 		"kubectl --kubeconfig $HOME/kc delete pod foo",
 		'kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		"kubectl --kubeconfig=$HOME/kc delete pod foo",
+		'kubectl --kubeconfig="$HOME/kc" delete pod foo',
+		"kubectl --kubeconfig ~//kc delete pod foo",
+		"kubectl --kubeconfig $HOME//kc delete pod foo",
 	]) {
 		const match = findMatchingBypassRule(executionIdentity("bash", { command }, "/repo")!, SETTINGS);
 		assert.equal(match?.scope.kind, "kubectl-kubeconfig", command);
 	}
+	const escaped = findMatchingBypassRule(
+		executionIdentity("bash", { command: String.raw`kubectl --kubeconfig "/tmp/\q" delete pod foo` }, "/repo")!,
+		SETTINGS,
+	);
+	assert.deepEqual(escaped?.scope, { kind: "kubectl-kubeconfig", path: String.raw`/tmp/\q` });
 });
 
 test("findMatchingBypassRule matches through wrappers and compound segments", () => {

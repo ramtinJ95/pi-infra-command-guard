@@ -67,10 +67,10 @@ function formatDuration(durationMs: number): string {
 function expandHomePath(path: string): string {
 	if (path === "~" || path === "$HOME" || path === "${HOME}") return homedir();
 	if (path.startsWith(`~${sep}`) || path.startsWith("~/") || path.startsWith("~\\")) {
-		return resolve(homedir(), path.slice(2));
+		return resolve(homedir(), path.slice(2).replace(/^[/\\]+/, ""));
 	}
 	for (const prefix of ["$HOME/", "$HOME\\", "${HOME}/", "${HOME}\\"]) {
-		if (path.startsWith(prefix)) return resolve(homedir(), path.slice(prefix.length));
+		if (path.startsWith(prefix)) return resolve(homedir(), path.slice(prefix.length).replace(/^[/\\]+/, ""));
 	}
 	return path;
 }
@@ -291,7 +291,7 @@ function normalizeKubeconfigPath(value: string, rawValue: string, attached: bool
 		return expanded.startsWith("~") ? undefined : resolve(expanded);
 	}
 	if (isHomeReference(value)) {
-		if (attached || (rawValue !== value && rawValue !== `"${value}"`)) return undefined;
+		if (rawValue !== value && rawValue !== `"${value}"`) return undefined;
 		return resolve(expandHomePath(value));
 	}
 	if (value.includes("$")) return undefined;

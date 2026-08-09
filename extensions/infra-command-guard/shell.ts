@@ -270,7 +270,16 @@ function parseSimpleCommands(command: string): ParsedCommands {
 			}
 			if (ch === "\\") {
 				currentRaw += ch;
-				escapeNext = true;
+				if (next === "\n") {
+					currentRaw += next;
+					i += 1;
+					continue;
+				}
+				if (next === "$" || next === "`" || next === '"' || next === "\\") {
+					escapeNext = true;
+				} else {
+					current += ch;
+				}
 				continue;
 			}
 			add(ch, true);
