@@ -123,10 +123,17 @@ test("classified-dangerous-only mode skips uncertainty approvals but keeps known
 	const uncertain = executionIdentity("exec-command", { cmd: 'rg -n "kubectl|vault" README.md' }, "/tmp")!;
 	assert.deepEqual(guardExecution(store, uncertain, "tui", relaxed), { allow: true });
 
-	const risky = executionIdentity("exec-command", { cmd: "kubectl delete pod api" }, "/tmp")!;
+	const risky = executionIdentity(
+		"exec-command",
+		{ cmd: "tmp=$(mktemp); kubectl apply --server-side -f app.yaml" },
+		"/tmp",
+	)!;
 	const blocked = guardExecution(store, risky, "tui", relaxed);
 	assert.equal(blocked.allow, false);
 	assert.equal(blocked.requestId, "relaxed-request");
+	assert.deepEqual(store.approve("relaxed-request", risky.command, "kubectl apply is not on the low-risk allowlist"), { ok: true });
+	assert.deepEqual(guardExecution(store, risky, "tui", relaxed), { allow: true });
+	assert.equal(guardExecution(store, risky, "tui", relaxed).allow, false);
 });
 
 test("interactive interpreters are denied rather than approvable", () => {
@@ -323,6 +330,15 @@ test("unparseable commands and non-bypassable risks never produce a bypass offer
 	);
 	assert.equal(unparseable.allow, false);
 	assert.equal(unparseable.bypassInfo, undefined);
+	const astRecovered = guardExecution(
+		store,
+		executionIdentity("bash", { command: "deploy() { kubectl delete pod foo; }; deploy" }, "/repo")!,
+		"tui",
+		{ ...DEFAULT_COMMAND_POLICY_SETTINGS, guardUnclassifiedCommands: false },
+		bypasses,
+	);
+	assert.equal(astRecovered.allow, false);
+	assert.equal(astRecovered.bypassInfo, undefined);
 	const raw = guardExecution(
 		store,
 		executionIdentity("bash", { command: "kubectl get --raw=/api/v1" }, "/repo")!,
