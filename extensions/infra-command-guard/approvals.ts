@@ -7,7 +7,7 @@ import {
 	type GuardedExecutable,
 } from "./guarded-executables.ts";
 import { evaluateCommand, isInteractiveInterpreterCommand } from "./policy.ts";
-import { findMatchingBypassRule } from "./bypass.ts";
+import { findMatchingBypassRule, type BypassScope } from "./bypass.ts";
 
 const APPROVAL_STORE_KEY = Symbol.for("infra-command-guard.approval-store.v1");
 const BYPASS_STORE_KEY = Symbol.for("infra-command-guard.bypass-store.v1");
@@ -33,7 +33,7 @@ interface PendingApproval {
 
 type GuardBypassResult = {
 	executable: GuardedExecutable;
-	normalizedPrefix: string[];
+	scope: BypassScope;
 	cwd: string;
 };
 
@@ -185,7 +185,7 @@ function guardExecution(
 	settings: CommandPolicySettings = DEFAULT_COMMAND_POLICY_SETTINGS,
 	bypassStore?: {
 		isPaused(): boolean;
-		matches(executable: GuardedExecutable, cwd: string, args: readonly string[]): boolean;
+		matches(executable: GuardedExecutable, cwd: string, scope: BypassScope): boolean;
 	},
 ): GuardDecision {
 	if (hasEnabledGuards(settings.guards) && identity.tty && isInteractiveInterpreterCommand(identity.command)) {
@@ -202,7 +202,7 @@ function guardExecution(
 	const bypassMatch = bypassStore ? findMatchingBypassRule(identity, settings) : undefined;
 	if (
 		bypassMatch &&
-		bypassStore?.matches(bypassMatch.executable, identity.cwd, bypassMatch.normalizedPrefix)
+		bypassStore?.matches(bypassMatch.executable, identity.cwd, bypassMatch.scope)
 	) {
 		return { allow: true };
 	}
@@ -226,7 +226,7 @@ function guardExecution(
 			? {
 					bypassInfo: {
 						executable: bypassMatch.executable,
-						normalizedPrefix: bypassMatch.normalizedPrefix,
+						scope: bypassMatch.scope,
 						cwd: identity.cwd,
 					},
 				}

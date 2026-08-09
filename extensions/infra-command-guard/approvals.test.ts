@@ -153,13 +153,24 @@ test("interactive interpreters are denied rather than approvable", () => {
 	);
 });
 
-test("an active pause allows guarded commands without touching approvals", () => {
+test("an active pause is a full policy off switch without touching approvals", () => {
 	const store = new ApprovalStore(() => 1_000, () => "paused-request");
 	const bypasses = new GuardBypassStore(() => 1_000);
 	const identity = executionIdentity("bash", { command: "rm paused-target" }, "/tmp")!;
 	assert.equal(guardExecution(store, identity, "tui", DEFAULT_COMMAND_POLICY_SETTINGS, bypasses).allow, false);
 	bypasses.pause(10 * 60 * 1000);
 	assert.deepEqual(guardExecution(store, identity, "tui", DEFAULT_COMMAND_POLICY_SETTINGS, bypasses), { allow: true });
+	assert.deepEqual(
+		guardExecution(
+			store,
+			executionIdentity("bash", { command: "kubectl get --raw=/api/v1" }, "/tmp")!,
+			"tui",
+			DEFAULT_COMMAND_POLICY_SETTINGS,
+			bypasses,
+		),
+		{ allow: true },
+		"operator pause intentionally bypasses non-bypassable command policy",
+	);
 });
 
 test("interactive interpreter blocks ignore pauses and bypass rules", () => {
@@ -172,7 +183,7 @@ test("interactive interpreter blocks ignore pauses and bypass rules", () => {
 	assert.match(guarded.reason, /interactive shell and interpreter sessions/);
 });
 
-test("scoped bypass rules allow matching prefixes in the stored cwd only", () => {
+test("kubeconfig bypasses cover guarded kubectl commands in the stored cwd only", () => {
 	const store = new ApprovalStore(() => 1_000, () => "bypass-request");
 	const bypasses = new GuardBypassStore(() => 1_000);
 	const identity = executionIdentity(
@@ -185,11 +196,11 @@ test("scoped bypass rules allow matching prefixes in the stored cwd only", () =>
 	assert.equal(first.allow, false);
 	assert.deepEqual(first.bypassInfo, {
 		executable: "kubectl",
-		normalizedPrefix: ["--kubeconfig", "/tmp/kc", "delete", "pod", "foo"],
+		scope: { kind: "kubectl-kubeconfig", path: "/tmp/kc" },
 		cwd: "/repo",
 	});
 
-	bypasses.addRule("kubectl", "/repo", ["--kubeconfig", "/tmp/kc", "delete", "pod"], 10 * 60 * 1000);
+	bypasses.addRule("kubectl", "/repo", { kind: "kubectl-kubeconfig", path: "/tmp/kc" }, 10 * 60 * 1000);
 	assert.deepEqual(guardExecution(store, identity, "tui", DEFAULT_COMMAND_POLICY_SETTINGS, bypasses), { allow: true });
 	assert.deepEqual(
 		guardExecution(
@@ -200,6 +211,17 @@ test("scoped bypass rules allow matching prefixes in the stored cwd only", () =>
 			bypasses,
 		),
 		{ allow: true },
+	);
+	assert.deepEqual(
+		guardExecution(
+			store,
+			executionIdentity("bash", { command: "kubectl rollout restart deployment/api --kubeconfig=/tmp/kc" }, "/repo/sub")!,
+			"tui",
+			DEFAULT_COMMAND_POLICY_SETTINGS,
+			bypasses,
+		),
+		{ allow: true },
+		"the kubeconfig scope intentionally covers a different guarded kubectl operation",
 	);
 	assert.equal(
 		guardExecution(
@@ -214,12 +236,78 @@ test("scoped bypass rules allow matching prefixes in the stored cwd only", () =>
 	assert.equal(
 		guardExecution(
 			store,
+			executionIdentity("bash", { command: "kubectl --kubeconfig /tmp/other delete pod foo" }, "/repo")!,
+			"tui",
+			DEFAULT_COMMAND_POLICY_SETTINGS,
+			bypasses,
+		).allow,
+		false,
+	);
+	assert.equal(
+		guardExecution(
+			store,
+			executionIdentity(
+				"bash",
+				{ command: "kubectl --kubeconfig /tmp/kc delete pod foo --kubeconfig /tmp/other" },
+				"/repo",
+			)!,
+			"tui",
+			DEFAULT_COMMAND_POLICY_SETTINGS,
+			bypasses,
+		).allow,
+		false,
+		"an appended kubeconfig cannot redirect a trusted scope",
+	);
+	assert.equal(
+		guardExecution(
+			store,
 			executionIdentity("bash", { command: "kubectl apply -f x.yaml" }, "/repo")!,
 			"tui",
 			DEFAULT_COMMAND_POLICY_SETTINGS,
 			bypasses,
 		).allow,
 		false,
+	);
+	assert.equal(
+		guardExecution(
+			store,
+			executionIdentity("bash", { command: "kubectl --kubeconfig /tmp/kc get --raw=/api/v1" }, "/repo")!,
+			"tui",
+			DEFAULT_COMMAND_POLICY_SETTINGS,
+			bypasses,
+		).allow,
+		false,
+		"non-bypassable kubectl capabilities stay guarded within the trusted kubeconfig",
+	);
+	for (const separator of ["&&", ";", "||", "|"]) {
+		for (const otherRisk of ["rm other-target", "terraform apply", "vault read secret/data/test"]) {
+			const compound = `kubectl --kubeconfig /tmp/kc delete pod foo ${separator} ${otherRisk}`;
+			assert.equal(
+				guardExecution(
+					store,
+					executionIdentity("bash", { command: compound }, "/repo")!,
+					"tui",
+					DEFAULT_COMMAND_POLICY_SETTINGS,
+					bypasses,
+				).allow,
+				false,
+				`a matching bypass must not authorize another guarded invocation: ${compound}`,
+			);
+		}
+	}
+	assert.deepEqual(
+		guardExecution(
+			store,
+			executionIdentity(
+				"bash",
+				{ command: "kubectl --kubeconfig /tmp/kc delete pod foo && printf safe" },
+				"/repo",
+			)!,
+			"tui",
+			DEFAULT_COMMAND_POLICY_SETTINGS,
+			bypasses,
+		),
+		{ allow: true },
 	);
 });
 

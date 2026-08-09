@@ -129,11 +129,11 @@ After editing the file, have the user run `/infra-guard-notify-test`. Terminal p
 `extensions/infra-command-guard/index.ts` is composition only. Keep dependencies directed toward it; internal modules must not import `index.ts`.
 
 - `attention.ts`: JSON configuration, native and terminal notifications, Herdr routing, and custom sound
-- `shell.ts`: shell parsing, wrapper extraction, and indirect-execution detection
+- `shell.ts`: shell parsing with raw token provenance, wrapper extraction, and indirect-execution detection
 - `tool-policies.ts`: tool allowlists, evaluators, global-option normalization, and non-bypassable tool risks
 - `policy.ts`: guarded-command orchestration, custom command-rule matching, and stable policy exports
 - `approvals.ts`: execution identity, expiring one-time grants, and guard decisions
-- `bypass.ts`: session-scoped pauses and cwd/prefix bypass rules, bypass-offer extraction
+- `bypass.ts`: session-scoped pauses, cwd/environment/prefix bypass scopes, and bypass-offer extraction
 - `approval-ui.ts`: structured approval overlay
 - `code-mode.ts`: optional dynamic adapter for pi-codex-conversion's published nested-tool preflight API
 - `guarded-executables.ts`: canonical guarded executable names shared by scanning and policy dispatch
@@ -141,13 +141,13 @@ After editing the file, have the user run `/infra-guard-notify-test`. Terminal p
 
 Keep tool-specific policy out of `shell.ts`. Add an executable name in `guarded-executables.ts`, implement its rules in `tool-policies.ts`, and register its evaluator in `policy.ts`; the typed registry fails type-checking when a guarded executable has no evaluator. Global `Symbol.for(...)` keys are reload compatibility boundaries and must remain byte-for-byte stable.
 
-Tests mirror module ownership (`attention.test.ts`, `shell.test.ts`, `policy.test.ts`, `command-policy-corpus.test.ts`, `approvals.test.ts`, `bypass.test.ts`, and `code-mode.test.ts`). Keep cross-module Pi lifecycle coverage in `extension.test.ts`. `index.test.ts` is only the aggregate runner; do not restore a production `_test` export to reach internals. Shell fuzzing must be deterministic so CI failures are reproducible.
+Tests mirror module ownership (`attention.test.ts`, `shell.test.ts`, `policy.test.ts`, `command-policy-corpus.test.ts`, `approvals.test.ts`, `approval-ui.test.ts`, `bypass.test.ts`, and `code-mode.test.ts`). Keep cross-module Pi lifecycle coverage in `extension.test.ts`. `index.test.ts` is only the aggregate runner; do not restore a production `_test` export to reach internals. Shell fuzzing must be deterministic so CI failures are reproducible.
 
 ### Checks
 
 - Run `npm run check` after changes; it type-checks, tests, and verifies the package contents.
 - Preserve the block → structured TUI approval → exact one-time retry flow.
-- Pauses and scoped bypasses are session-scoped, in-memory, and TUI-only. They must never persist to disk, never be creatable by the agent, and never bypass interactive-TTY blocks or non-bypassable tool risks. Bypass rules always include the working-directory scope and the target-identifying option values (for example `--kubeconfig`).
+- Pauses and scoped bypasses are session-scoped, in-memory, and TUI-only. They must never persist to disk or be creatable by the agent. A pause is the operator-controlled full off switch and deliberately bypasses command policy and non-bypassable tool risks, but never the interactive-TTY compatibility block. Scoped bypasses must never bypass interactive-TTY blocks, non-bypassable tool risks, or another guarded operation in a compound command. Bypass rules always include the working-directory scope. An explicit, unambiguous kubectl `--kubeconfig` creates a kubeconfig-wide scope for bypassable kubectl operations in that directory subtree; ambiguous, dynamic, or cwd-uncertain forms receive no bypass offer, and other rules retain normalized command-prefix scope. Changing pause or bypass state invalidates pending and unused one-time approvals.
 - Notification failures must never approve, execute, or suppress a blocked command.
 - Keep terminal protocols explicit: Kitty uses OSC 99; Ghostty uses OSC 9. Do not send guessed control sequences to unknown terminals.
 - Keep the extension silent by default and do not bundle third-party audio.

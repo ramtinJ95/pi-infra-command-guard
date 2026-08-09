@@ -11,8 +11,10 @@ import {
 import {
 	DURATION_OPTIONS,
 	GuardBypassStore,
+	describeBypassScope,
 	findMatchingBypassRule,
 	formatDuration,
+	sameBypassScope,
 } from "./bypass.ts";
 import { requestInfraApproval } from "./approval-ui.ts";
 import { loadPolicySettings, requestApprovalAttention } from "./attention.ts";
@@ -130,19 +132,25 @@ export default function createExtension(pi: ExtensionAPI) {
 			}
 			const bypassStore = currentBypasses();
 			const paused = bypassStore.isPaused();
-			const active = bypassStore.describe().filter((line) => !paused || !line.startsWith("Guard paused"));
+			const activeRules = bypassStore.listRules();
+			const removeOptions = activeRules.map((rule, index) => ({
+				label: `Remove bypass ${index + 1}: ${bypassStore.describeRule(rule)}`,
+				rule,
+			}));
 			const pauseOption = paused ? "Resume guard now" : "Pause guard…";
 			const clearOption = "Clear all pauses and bypasses";
+			const activeCount = (paused ? 1 : 0) + activeRules.length;
 			const options = [
-				...(active.length > 0 ? active.map((line) => `Bypass: ${line}`) : ["No active scoped bypasses"]),
 				pauseOption,
-				...(paused || active.length > 0 ? [clearOption] : []),
+				...removeOptions.map((option) => option.label),
+				...(activeCount > 1 ? [clearOption] : []),
 			];
 			const choice = await ctx.ui.select("infra-command-guard", options);
 			if (!choice) return;
 			if (choice === pauseOption) {
 				if (paused) {
 					bypassStore.resume();
+					currentApprovals().clear();
 					syncBypassStatus(ctx);
 					ctx.ui.notify("infra-command-guard resumed.", "info");
 					return;
@@ -154,12 +162,23 @@ export default function createExtension(pi: ExtensionAPI) {
 				const option = DURATION_OPTIONS.find((candidate) => candidate.label === duration);
 				if (!option) return;
 				bypassStore.pause(option.value);
+				currentApprovals().clear();
 				syncBypassStatus(ctx);
 				ctx.ui.notify(`infra-command-guard paused for ${option.label}.`, "warning");
 				return;
 			}
+			const removal = removeOptions.find((option) => option.label === choice);
+			if (removal) {
+				const { rule } = removal;
+				if (!bypassStore.removeRule(rule)) return;
+				currentApprovals().clear();
+				syncBypassStatus(ctx);
+				ctx.ui.notify(`Removed bypass: ${describeBypassScope(rule.executable, rule.scope)} in ${rule.cwd}`, "info");
+				return;
+			}
 			if (choice === clearOption) {
 				bypassStore.clear();
+				currentApprovals().clear();
 				syncBypassStatus(ctx);
 				ctx.ui.notify("All infra-command-guard pauses and bypasses cleared.", "info");
 			}
@@ -212,18 +231,19 @@ export default function createExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			const blockedIdentity = executionIdentity("bash", { command: params.command }, ctx.cwd);
-			const bypassOffer = blockedIdentity
-				? findMatchingBypassRule(blockedIdentity, currentPolicySettings(ctx))
-				: undefined;
+			const blockedIdentity = validation.pending.identity;
+			const bypassOffer = findMatchingBypassRule(blockedIdentity, currentPolicySettings(ctx));
 			const bypassOfferConfig =
-				bypassOffer && blockedIdentity
+				bypassOffer
 					? {
 						executable: bypassOffer.executable,
-						normalizedPrefix: bypassOffer.normalizedPrefix,
+						scope: bypassOffer.scope,
 						cwd: blockedIdentity.cwd,
 					}
 					: undefined;
+			const bypassDescription = bypassOfferConfig
+				? describeBypassScope(bypassOfferConfig.executable, bypassOfferConfig.scope)
+				: undefined;
 			const approvalDetails = bypassOfferConfig
 				? {
 					summary: params.summary,
@@ -231,7 +251,9 @@ export default function createExtension(pi: ExtensionAPI) {
 						...params.flags,
 						{
 							...BYPASS_OFFER_FLAG,
-							meaning: `Choosing bypass trusts ${bypassOfferConfig.executable} ${bypassOfferConfig.normalizedPrefix.join(" ")} (and trailing arguments) without approval while this session runs in ${bypassOfferConfig.cwd} or its subdirectories, for the selected duration. Other directories and commands remain guarded.`,
+							meaning: bypassOfferConfig.scope.kind === "kubectl-kubeconfig"
+								? `Choosing bypass trusts every guarded kubectl command that explicitly uses the exact kubeconfig ${bypassOfferConfig.scope.path}, without approval, while commands run in ${bypassOfferConfig.cwd} or its subdirectories for the selected duration. Other kubeconfigs, directories, guarded tools, and non-bypassable kubectl capabilities remain guarded.`
+								: `Choosing bypass trusts ${bypassDescription} and trailing arguments without approval while commands run in ${bypassOfferConfig.cwd} or its subdirectories for the selected duration. Other directories and commands remain guarded.`,
 						},
 					],
 					blastRadius: params.blastRadius,
@@ -239,14 +261,14 @@ export default function createExtension(pi: ExtensionAPI) {
 				: { summary: params.summary, flags: params.flags, blastRadius: params.blastRadius };
 
 			await requestApprovalAttention(ctx);
-			const approved = await requestInfraApproval(
+			const approvalChoice = await requestInfraApproval(
 				ctx,
 				approvalDetails,
 				params.reason,
 				params.command,
 				bypassOfferConfig
 					? {
-						label: `Approve & bypass ${bypassOfferConfig.executable} ${bypassOfferConfig.normalizedPrefix.join(" ")} in this directory for…`,
+						label: `Approve & bypass ${bypassDescription} in this directory for…`,
 						onSelect: async (select) => {
 							const duration = await select(
 								"Bypass duration",
@@ -254,15 +276,34 @@ export default function createExtension(pi: ExtensionAPI) {
 							);
 							const option = DURATION_OPTIONS.find((candidate) => candidate.label === duration);
 							if (!option) return false;
+							const refreshedSettings = currentPolicySettings(ctx);
+							const refreshedValidation = approvalStore.validate(
+								validation.pending.id,
+								params.command,
+								params.reason,
+							);
+							const refreshedOffer = refreshedValidation.ok
+								? findMatchingBypassRule(refreshedValidation.pending.identity, refreshedSettings)
+								: undefined;
+							if (
+								!refreshedValidation.ok ||
+								!refreshedOffer ||
+								refreshedOffer.executable !== bypassOfferConfig.executable ||
+								refreshedValidation.pending.identity.cwd !== bypassOfferConfig.cwd ||
+								!sameBypassScope(refreshedOffer.scope, bypassOfferConfig.scope)
+							) {
+								ctx.ui.notify("Bypass request expired or changed. Run the blocked command again.", "warning");
+								return false;
+							}
 							currentBypasses().addRule(
 								bypassOfferConfig.executable,
 								bypassOfferConfig.cwd,
-								bypassOfferConfig.normalizedPrefix,
+								bypassOfferConfig.scope,
 								option.value,
 							);
 							syncBypassStatus(ctx);
 							ctx.ui.notify(
-								`Bypass active for ${formatDuration(option.value)}: ${bypassOfferConfig.executable} ${bypassOfferConfig.normalizedPrefix.join(" ")} in ${bypassOfferConfig.cwd}`,
+								`Bypass active for ${formatDuration(option.value)}: ${bypassDescription} in ${bypassOfferConfig.cwd}`,
 								"warning",
 							);
 							return true;
@@ -270,11 +311,24 @@ export default function createExtension(pi: ExtensionAPI) {
 					}
 					: undefined,
 			);
-			if (!approved) {
+			if (approvalChoice === "cancel") {
 				approvalStore.cancel(validation.pending.id);
 				return {
 					content: [{ type: "text", text: "User cancelled. Do not retry the command." }],
 					details: { approved: false, requestId: validation.pending.id, reason: params.reason, command: params.command },
+				};
+			}
+			if (approvalChoice === "bypass") {
+				approvalStore.clear();
+				return {
+					content: [{ type: "text", text: "Bypass active. Retry the exact same command with the same execution context now." }],
+					details: {
+						approved: true,
+						bypass: true,
+						requestId: validation.pending.id,
+						reason: params.reason,
+						command: params.command,
+					},
 				};
 			}
 

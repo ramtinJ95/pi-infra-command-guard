@@ -245,7 +245,7 @@ async function requestInfraApproval(
 	reason: string,
 	command: string,
 	bypass?: BypassOffer,
-): Promise<boolean> {
+): Promise<ApprovalChoice> {
 	const choice = await ctx.ui.custom<ApprovalChoice>(
 		(tui: TUI, theme: Theme, keybindings: KeybindingsManager, done: (choice: ApprovalChoice) => void) =>
 			new InfraApprovalOverlay(tui, theme, keybindings, approvalDetails, reason, command, bypass, done),
@@ -260,10 +260,12 @@ async function requestInfraApproval(
 		},
 	);
 	if (choice === "bypass" && bypass) {
-		return bypass.onSelect((title, options) => ctx.ui.select(title, options));
+		return await bypass.onSelect((title, options) => ctx.ui.select(title, options))
+			? "bypass"
+			: "cancel";
 	}
-	return choice === "once";
+	return choice === "once" ? "once" : "cancel";
 }
 
 export { requestInfraApproval };
-export type { ApprovalDetails, BypassOffer };
+export type { ApprovalChoice, ApprovalDetails, BypassOffer };

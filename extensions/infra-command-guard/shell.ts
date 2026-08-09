@@ -3,7 +3,7 @@ import { GUARDED_EXECUTABLES } from "./guarded-executables.ts";
 const GUARDED_PATTERNS = new Map<string, RegExp>();
 const DEFAULT_GUARDED_PATTERN = new RegExp(`\\b(?:${GUARDED_EXECUTABLES.join("|")})\\b`, "i");
 
-type ShellSegment = { words: string[]; bare: string };
+type ShellSegment = { words: string[]; rawWords: string[]; bare: string };
 type ParsedCommands =
 	| { segments: ShellSegment[]; error?: undefined }
 	| { segments?: undefined; error: string };
@@ -180,8 +180,10 @@ function classifyLeadingOption(
 function parseSimpleCommands(command: string): ParsedCommands {
 	const segments: ShellSegment[] = [];
 	let words: string[] = [];
+	let rawWords: string[] = [];
 	let bareWords: string[] = [];
 	let current = "";
+	let currentRaw = "";
 	let currentBare = "";
 	let inSingle = false;
 	let inDouble = false;
@@ -191,31 +193,37 @@ function parseSimpleCommands(command: string): ParsedCommands {
 
 	const add = (ch: string, quoted: boolean): void => {
 		current += ch;
+		currentRaw += ch;
 		if (!quoted) currentBare += ch;
 	};
 
 	const pushWord = () => {
 		if (!current) {
+			currentRaw = "";
 			currentBare = "";
 			return;
 		}
 		if (skipNextWord) {
 			skipNextWord = false;
 			current = "";
+			currentRaw = "";
 			currentBare = "";
 			return;
 		}
 		words.push(current);
+		rawWords.push(currentRaw);
 		bareWords.push(currentBare);
 		current = "";
+		currentRaw = "";
 		currentBare = "";
 	};
 
 	const pushSegment = () => {
 		pushWord();
 		if (words.length > 0) {
-			segments.push({ words, bare: bareWords.join(" ") });
+			segments.push({ words, rawWords, bare: bareWords.join(" ") });
 			words = [];
+			rawWords = [];
 			bareWords = [];
 		}
 	};
@@ -240,13 +248,17 @@ function parseSimpleCommands(command: string): ParsedCommands {
 		}
 
 		if (inSingle) {
-			if (ch === "'") inSingle = false;
+			if (ch === "'") {
+				currentRaw += ch;
+				inSingle = false;
+			}
 			else add(ch, true);
 			continue;
 		}
 
 		if (inDouble) {
 			if (ch === '"') {
+				currentRaw += ch;
 				inDouble = false;
 				continue;
 			}
@@ -257,7 +269,17 @@ function parseSimpleCommands(command: string): ParsedCommands {
 				continue;
 			}
 			if (ch === "\\") {
-				escapeNext = true;
+				currentRaw += ch;
+				if (next === "\n") {
+					currentRaw += next;
+					i += 1;
+					continue;
+				}
+				if (next === "$" || next === "`" || next === '"' || next === "\\") {
+					escapeNext = true;
+				} else {
+					current += ch;
+				}
 				continue;
 			}
 			add(ch, true);
@@ -270,16 +292,19 @@ function parseSimpleCommands(command: string): ParsedCommands {
 		}
 
 		if (ch === "\\") {
+			currentRaw += ch;
 			escapeNext = true;
 			continue;
 		}
 
 		if (ch === "'") {
+			currentRaw += ch;
 			inSingle = true;
 			continue;
 		}
 
 		if (ch === '"') {
+			currentRaw += ch;
 			inDouble = true;
 			continue;
 		}
@@ -320,6 +345,7 @@ function parseSimpleCommands(command: string): ParsedCommands {
 			if (ch === "<" && next === "<") return { error: "Heredoc syntax is not supported" };
 			if (/^\d+$/.test(current)) {
 				current = "";
+				currentRaw = "";
 				currentBare = "";
 			}
 			else pushWord();
