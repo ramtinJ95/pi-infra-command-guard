@@ -39,14 +39,17 @@ const BYPASSABLE_EXECUTABLES = [
 type BypassRule = {
 	executable: GuardedExecutable;
 	cwd: string;
-	prefix: readonly string[];
+	scope: BypassScope;
 	expiresAt: number;
 };
 
+type BypassScope =
+	| { kind: "command-prefix"; tokens: readonly string[] }
+	| { kind: "kubectl-kubeconfig"; path: string };
+
 type MatchingInvocation = {
 	executable: GuardedExecutable;
-	args: string[];
-	normalizedPrefix: string[];
+	scope: BypassScope;
 };
 
 function formatDuration(durationMs: number): string {
@@ -57,9 +60,12 @@ function formatDuration(durationMs: number): string {
 }
 
 function expandHomePath(path: string): string {
-	if (path === "~") return homedir();
+	if (path === "~" || path === "$HOME" || path === "${HOME}") return homedir();
 	if (path.startsWith(`~${sep}`) || path.startsWith("~/") || path.startsWith("~\\")) {
 		return resolve(homedir(), path.slice(2));
+	}
+	for (const prefix of ["$HOME/", "$HOME\\", "${HOME}/", "${HOME}\\"]) {
+		if (path.startsWith(prefix)) return resolve(homedir(), path.slice(prefix.length));
 	}
 	return path;
 }
@@ -87,20 +93,19 @@ class GuardBypassStore {
 		return this.pauseExpiresAt !== undefined;
 	}
 
-	addRule(executable: GuardedExecutable, cwd: string, prefix: readonly string[], durationMs: number): BypassRule {
+	addRule(executable: GuardedExecutable, cwd: string, scope: BypassScope, durationMs: number): BypassRule {
 		this.prune();
 		const existing = this.rules.find(
 			(rule) =>
 				rule.executable === executable &&
 				rule.cwd === cwd &&
-				rule.prefix.length === prefix.length &&
-				rule.prefix.every((token, index) => token === prefix[index]),
+				scopesEqual(rule.scope, scope),
 		);
 		if (existing) {
 			existing.expiresAt = this.now() + durationMs;
 			return existing;
 		}
-		const rule = { executable, cwd, prefix: [...prefix], expiresAt: this.now() + durationMs };
+		const rule = { executable, cwd, scope: copyScope(scope), expiresAt: this.now() + durationMs };
 		this.rules.push(rule);
 		return rule;
 	}
@@ -122,13 +127,12 @@ class GuardBypassStore {
 		this.rules.length = 0;
 	}
 
-	matches(executable: GuardedExecutable, cwd: string, args: readonly string[]): boolean {
+	matches(executable: GuardedExecutable, cwd: string, scope: BypassScope): boolean {
 		this.prune();
 		for (const rule of this.rules) {
 			if (rule.executable !== executable) continue;
 			if (!isPathWithin(cwd, rule.cwd)) continue;
-			if (args.length < rule.prefix.length) continue;
-			if (rule.prefix.every((token, index) => token === args[index])) return true;
+			if (scopeMatches(rule.scope, scope)) return true;
 		}
 		return false;
 	}
@@ -146,7 +150,7 @@ class GuardBypassStore {
 	}
 
 	describeRule(rule: BypassRule): string {
-		return `${rule.executable} ${rule.prefix.join(" ")} in ${rule.cwd} — bypassed for ${formatDuration(rule.expiresAt - this.now())}`;
+		return `${describeBypassScope(rule.executable, rule.scope)} in ${rule.cwd} — bypassed for ${formatDuration(rule.expiresAt - this.now())}`;
 	}
 
 	private prune(): void {
@@ -156,6 +160,43 @@ class GuardBypassStore {
 			if (this.rules[index].expiresAt <= now) this.rules.splice(index, 1);
 		}
 	}
+}
+
+function copyScope(scope: BypassScope): BypassScope {
+	return scope.kind === "command-prefix"
+		? { kind: "command-prefix", tokens: [...scope.tokens] }
+		: { ...scope };
+}
+
+function scopesEqual(left: BypassScope, right: BypassScope): boolean {
+	if (left.kind !== right.kind) return false;
+	if (left.kind === "kubectl-kubeconfig" && right.kind === "kubectl-kubeconfig") {
+		return left.path === right.path;
+	}
+	if (left.kind === "command-prefix" && right.kind === "command-prefix") {
+		return left.tokens.length === right.tokens.length &&
+			left.tokens.every((token, index) => token === right.tokens[index]);
+	}
+	return false;
+}
+
+function scopeMatches(rule: BypassScope, candidate: BypassScope): boolean {
+	if (rule.kind !== candidate.kind) return false;
+	if (rule.kind === "kubectl-kubeconfig" && candidate.kind === "kubectl-kubeconfig") {
+		return rule.path === candidate.path;
+	}
+	if (rule.kind === "command-prefix" && candidate.kind === "command-prefix") {
+		return candidate.tokens.length >= rule.tokens.length &&
+			rule.tokens.every((token, index) => token === candidate.tokens[index]);
+	}
+	return false;
+}
+
+function describeBypassScope(executable: GuardedExecutable, scope: BypassScope): string {
+	if (scope.kind === "kubectl-kubeconfig") {
+		return `all guarded kubectl commands using kubeconfig ${scope.path}`;
+	}
+	return `${executable} ${scope.tokens.join(" ")}`;
 }
 
 const PATH_SCOPED_OPTION_NAMES = new Set([
@@ -191,10 +232,32 @@ function normalizeBypassTokens(executable: GuardedExecutable, args: readonly str
 	});
 }
 
+function kubectlKubeconfigScope(args: readonly string[], cwd: string): BypassScope | undefined {
+	let value: string | undefined;
+	for (let index = 0; index < args.length; index += 1) {
+		const token = args[index];
+		let candidate: string | undefined;
+		if (token === "--kubeconfig") {
+			candidate = args[index + 1];
+			index += 1;
+		} else if (token.startsWith("--kubeconfig=")) {
+			candidate = token.slice("--kubeconfig=".length);
+		}
+		if (candidate === undefined) continue;
+		if (value !== undefined || candidate.length === 0) return undefined;
+		value = candidate;
+	}
+	if (value === undefined) return undefined;
+	const expanded = expandHomePath(value);
+	if (expanded.startsWith("~") || expanded.includes("$") || expanded.includes("\0")) return undefined;
+	return { kind: "kubectl-kubeconfig", path: resolve(cwd, expanded) };
+}
+
 function invocationBypassCandidate(
 	executable: GuardedExecutable,
 	invocation: Invocation,
 	settings: CommandPolicySettings,
+	cwd: string,
 ): MatchingInvocation | undefined {
 	const guardSettings = settings.guards;
 	if (!guardSettings[executable]) return undefined;
@@ -202,9 +265,11 @@ function invocationBypassCandidate(
 	if (decision.allow) return undefined;
 	const nonBypassable = evaluateNonBypassableRisk(executable, invocation);
 	if (nonBypassable && nonBypassable.basis !== "unclassified") return undefined;
+	const environmentScope = executable === "kubectl" ? kubectlKubeconfigScope(invocation.args, cwd) : undefined;
+	if (environmentScope) return { executable, scope: environmentScope };
 	const normalizedPrefix = normalizeBypassTokens(executable, invocation.args);
 	if (normalizedPrefix.length === 0) return undefined;
-	return { executable, args: [...invocation.args], normalizedPrefix };
+	return { executable, scope: { kind: "command-prefix", tokens: normalizedPrefix } };
 }
 
 function findMatchingBypassRule(
@@ -220,7 +285,7 @@ function findMatchingBypassRule(
 		if ("error" in invocation || !invocation.executable) return undefined;
 		const executable = invocation.executable as GuardedExecutable;
 		if (!(BYPASSABLE_EXECUTABLES as readonly string[]).includes(executable)) return undefined;
-		const match = invocationBypassCandidate(executable, invocation, settings);
+		const match = invocationBypassCandidate(executable, invocation, settings, identity.cwd);
 		if (!match) return undefined;
 		candidates.push(match);
 	}
@@ -234,9 +299,10 @@ export {
 	TEN_MINUTES_MS,
 	THIRTY_MINUTES_MS,
 	GuardBypassStore,
+	describeBypassScope,
 	expandHomePath,
 	findMatchingBypassRule,
 	formatDuration,
 	isPathWithin,
 };
-export type { BypassRule, MatchingInvocation };
+export type { BypassRule, BypassScope, MatchingInvocation };

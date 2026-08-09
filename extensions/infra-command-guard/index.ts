@@ -11,6 +11,7 @@ import {
 import {
 	DURATION_OPTIONS,
 	GuardBypassStore,
+	describeBypassScope,
 	findMatchingBypassRule,
 	formatDuration,
 } from "./bypass.ts";
@@ -168,7 +169,7 @@ export default function createExtension(pi: ExtensionAPI) {
 				if (!rule || !bypassStore.removeRule(rule)) return;
 				currentApprovals().clear();
 				syncBypassStatus(ctx);
-				ctx.ui.notify(`Removed bypass: ${rule.executable} ${rule.prefix.join(" ")} in ${rule.cwd}`, "info");
+				ctx.ui.notify(`Removed bypass: ${describeBypassScope(rule.executable, rule.scope)} in ${rule.cwd}`, "info");
 				return;
 			}
 			if (choice === clearOption) {
@@ -232,10 +233,13 @@ export default function createExtension(pi: ExtensionAPI) {
 				bypassOffer
 					? {
 						executable: bypassOffer.executable,
-						normalizedPrefix: bypassOffer.normalizedPrefix,
+						scope: bypassOffer.scope,
 						cwd: blockedIdentity.cwd,
 					}
 					: undefined;
+			const bypassDescription = bypassOfferConfig
+				? describeBypassScope(bypassOfferConfig.executable, bypassOfferConfig.scope)
+				: undefined;
 			const approvalDetails = bypassOfferConfig
 				? {
 					summary: params.summary,
@@ -243,7 +247,9 @@ export default function createExtension(pi: ExtensionAPI) {
 						...params.flags,
 						{
 							...BYPASS_OFFER_FLAG,
-							meaning: `Choosing bypass trusts ${bypassOfferConfig.executable} ${bypassOfferConfig.normalizedPrefix.join(" ")} (and trailing arguments) without approval while this session runs in ${bypassOfferConfig.cwd} or its subdirectories, for the selected duration. Other directories and commands remain guarded.`,
+							meaning: bypassOfferConfig.scope.kind === "kubectl-kubeconfig"
+								? `Choosing bypass trusts every guarded kubectl command that explicitly uses the exact kubeconfig ${bypassOfferConfig.scope.path}, without approval, while commands run in ${bypassOfferConfig.cwd} or its subdirectories for the selected duration. Other kubeconfigs, directories, guarded tools, and non-bypassable kubectl capabilities remain guarded.`
+								: `Choosing bypass trusts ${bypassDescription} and trailing arguments without approval while commands run in ${bypassOfferConfig.cwd} or its subdirectories for the selected duration. Other directories and commands remain guarded.`,
 						},
 					],
 					blastRadius: params.blastRadius,
@@ -258,7 +264,7 @@ export default function createExtension(pi: ExtensionAPI) {
 				params.command,
 				bypassOfferConfig
 					? {
-						label: `Approve & bypass ${bypassOfferConfig.executable} ${bypassOfferConfig.normalizedPrefix.join(" ")} in this directory for…`,
+						label: `Approve & bypass ${bypassDescription} in this directory for…`,
 						onSelect: async (select) => {
 							const duration = await select(
 								"Bypass duration",
@@ -269,12 +275,12 @@ export default function createExtension(pi: ExtensionAPI) {
 							currentBypasses().addRule(
 								bypassOfferConfig.executable,
 								bypassOfferConfig.cwd,
-								bypassOfferConfig.normalizedPrefix,
+								bypassOfferConfig.scope,
 								option.value,
 							);
 							syncBypassStatus(ctx);
 							ctx.ui.notify(
-								`Bypass active for ${formatDuration(option.value)}: ${bypassOfferConfig.executable} ${bypassOfferConfig.normalizedPrefix.join(" ")} in ${bypassOfferConfig.cwd}`,
+								`Bypass active for ${formatDuration(option.value)}: ${bypassDescription} in ${bypassOfferConfig.cwd}`,
 								"warning",
 							);
 							return true;

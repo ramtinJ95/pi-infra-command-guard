@@ -133,7 +133,7 @@ After editing the file, have the user run `/infra-guard-notify-test`. Terminal p
 - `tool-policies.ts`: tool allowlists, evaluators, global-option normalization, and non-bypassable tool risks
 - `policy.ts`: guarded-command orchestration, custom command-rule matching, and stable policy exports
 - `approvals.ts`: execution identity, expiring one-time grants, and guard decisions
-- `bypass.ts`: session-scoped pauses and cwd/prefix bypass rules, bypass-offer extraction
+- `bypass.ts`: session-scoped pauses, cwd/environment/prefix bypass scopes, and bypass-offer extraction
 - `approval-ui.ts`: structured approval overlay
 - `code-mode.ts`: optional dynamic adapter for pi-codex-conversion's published nested-tool preflight API
 - `guarded-executables.ts`: canonical guarded executable names shared by scanning and policy dispatch
@@ -147,7 +147,7 @@ Tests mirror module ownership (`attention.test.ts`, `shell.test.ts`, `policy.tes
 
 - Run `npm run check` after changes; it type-checks, tests, and verifies the package contents.
 - Preserve the block → structured TUI approval → exact one-time retry flow.
-- Pauses and scoped bypasses are session-scoped, in-memory, and TUI-only. They must never persist to disk, never be creatable by the agent, and never bypass interactive-TTY blocks, non-bypassable tool risks, or another guarded operation in a compound command. Bypass rules always include the working-directory scope and the target-identifying option values (for example `--kubeconfig`). Changing pause or bypass state invalidates pending and unused one-time approvals.
+- Pauses and scoped bypasses are session-scoped, in-memory, and TUI-only. They must never persist to disk, never be creatable by the agent, and never bypass interactive-TTY blocks, non-bypassable tool risks, or another guarded operation in a compound command. Bypass rules always include the working-directory scope. An explicit kubectl `--kubeconfig` creates a kubeconfig-wide scope for bypassable kubectl operations in that directory subtree; other rules retain normalized command-prefix scope. Changing pause or bypass state invalidates pending and unused one-time approvals.
 - Notification failures must never approve, execute, or suppress a blocked command.
 - Keep terminal protocols explicit: Kitty uses OSC 99; Ghostty uses OSC 9. Do not send guessed control sequences to unknown terminals.
 - Keep the extension silent by default and do not bundle third-party audio.

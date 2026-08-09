@@ -199,7 +199,7 @@ test("infra-guard menu pauses, resumes, and removes individual bypasses without 
 		) as { block: boolean };
 		assert.equal(blocked.block, true);
 
-		bypasses.addRule("kubectl", "/repo", ["delete", "pod", "api"], 10 * 60 * 1000);
+		bypasses.addRule("kubectl", "/repo", { kind: "command-prefix", tokens: ["delete", "pod", "api"] }, 10 * 60 * 1000);
 		const removeOption = `Remove bypass: ${bypasses.describeRule(bypasses.listRules()[0]!)}`;
 		await runMenu([removeOption], (_title, options) => {
 			assert.deepEqual(options, ["Pause guard…", removeOption]);
@@ -222,7 +222,7 @@ test("approval-overlay bypass keeps the blocked command cwd and does not leave a
 		const events = createTestEventBus().facade();
 		const { handlers, pi, tools } = createHarness(events);
 		const toolCall = handlers.get("tool_call")![0]!;
-		const command = "kubectl delete pod api";
+		const command = "kubectl --kubeconfig /tmp/kc delete pod api";
 		const blocked = await toolCall(
 			{ toolName: "exec_command", input: { cmd: command, workdir: "nested" } },
 			{ cwd: "/repo", mode: "tui" },
@@ -276,7 +276,7 @@ test("approval-overlay bypass keeps the blocked command cwd and does not leave a
 		const [rule] = bypasses.listRules();
 		assert.ok(rule);
 		assert.equal(rule.cwd, "/repo/nested");
-		assert.deepEqual(rule.prefix, ["delete", "pod", "api"]);
+		assert.deepEqual(rule.scope, { kind: "kubectl-kubeconfig", path: "/tmp/kc" });
 		assert.equal(
 			approvals.consume(executionIdentity("exec-command", { cmd: command, workdir: "nested" }, "/repo")!),
 			false,
@@ -288,6 +288,17 @@ test("approval-overlay bypass keeps the blocked command cwd and does not leave a
 				{ cwd: "/repo", mode: "tui" },
 			),
 			undefined,
+		);
+		assert.equal(
+			await toolCall(
+				{
+					toolName: "exec_command",
+					input: { cmd: "kubectl rollout restart deployment/api --kubeconfig=/tmp/kc", workdir: "nested" },
+				},
+				{ cwd: "/repo", mode: "tui" },
+			),
+			undefined,
+			"the approved kubeconfig covers a different guarded kubectl operation in the same cwd",
 		);
 		const outside = await toolCall(
 			{ toolName: "exec_command", input: { cmd: command } },
@@ -330,22 +341,26 @@ test("extension allows outer Code Mode calls only after its nested preflight con
 	broker.shutdown();
 });
 
-test("Code Mode scoped bypass permits only its single matching nested invocation", async () => {
+test("Code Mode kubeconfig bypass covers kubectl operations but not another guarded invocation", async () => {
 	const bus = createTestEventBus();
 	const broker = createPreflightBroker(bus.facade());
 	const { pi } = createHarness(bus.facade());
 	const preflight = await waitForPreflight(broker);
 	const bypasses = (pi.events as unknown as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as GuardBypassStore;
-	bypasses.addRule("kubectl", "/repo", ["delete", "pod", "api"], 10 * 60 * 1000);
+	bypasses.addRule("kubectl", "/repo", { kind: "kubectl-kubeconfig", path: "/tmp/kc" }, 10 * 60 * 1000);
 	const call = {
-		...nestedCall("kubectl delete pod api"),
+		...nestedCall("kubectl --kubeconfig /tmp/kc delete pod api"),
 		cwd: "/repo",
 		extensionContext: { cwd: "/repo", mode: "tui" } as never,
 	};
 	assert.equal(await preflight(call), undefined);
+	assert.equal(
+		await preflight({ ...call, input: { cmd: "kubectl rollout restart deployment/api --kubeconfig=/tmp/kc" } }),
+		undefined,
+	);
 	const compound = await preflight({
 		...call,
-		input: { cmd: "kubectl delete pod api && rm other-target" },
+		input: { cmd: "kubectl --kubeconfig /tmp/kc delete pod api && rm other-target" },
 	});
 	assert.equal(compound?.block, true);
 	assert.match(compound?.reason ?? "", /Approval request:/);
@@ -411,7 +426,12 @@ test("scoped bypasses apply across bash and exec_command paths within the stored
 		ui: { setStatus(_key: string, text: string | undefined) { statuses.push(text); } },
 	};
 	const bypassStore = (pi.events as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as {
-		addRule(executable: string, cwd: string, prefix: string[], durationMs: number): void;
+		addRule(
+			executable: "kubectl",
+			cwd: string,
+			scope: { kind: "kubectl-kubeconfig"; path: string },
+			durationMs: number,
+		): void;
 	};
 
 	const command = "kubectl --kubeconfig /tmp/kc delete pod foo";
@@ -422,11 +442,10 @@ test("scoped bypasses apply across bash and exec_command paths within the stored
 	assert.equal(blocked.block, true);
 	assert.match(blocked.reason, /Approval request:/);
 
-	bypassStore.addRule("kubectl", "/repo", ["--kubeconfig", "/tmp/kc", "delete", "pod"], 10 * 60 * 1000);
+	bypassStore.addRule("kubectl", "/repo", { kind: "kubectl-kubeconfig", path: "/tmp/kc" }, 10 * 60 * 1000);
 	assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: command } }, context), undefined);
 
 	const bash = tools.find((tool) => tool.name === "bash")!;
-	bypassStore.addRule("kubectl", "/repo", ["--kubeconfig", "/tmp/kc", "apply"], 10 * 60 * 1000);
 	await assert.rejects(
 		bash.execute("bypass-bash", { command: "kubectl --kubeconfig /tmp/kc apply -f x.yaml" }, undefined, undefined, context),
 		/error: stat \/tmp\/kc/,

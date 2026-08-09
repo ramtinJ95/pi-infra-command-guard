@@ -181,10 +181,12 @@ Run `/infra-guard` and choose `Pause guard…`, then pick 10 minutes, 30 minutes
 
 ### Scoped bypasses from the approval overlay
 
-When a blocked command contains a single guarded invocation whose prefix identifies a target — for example `kubectl --kubeconfig ~/.config/staging/kubeconfig delete pod foo` — the approval overlay gains a third choice, `Approve & bypass … for…`. Picking a duration (10 minutes, 30 minutes, or 1 hour) approves the command and records a bypass rule for that session:
+When a blocked command contains a single guarded invocation whose target can be scoped safely — for example `kubectl --kubeconfig ~/.config/staging/kubeconfig delete pod foo` — the approval overlay gains a third choice, `Approve & bypass … for…`. Picking a duration (10 minutes, 30 minutes, or 1 hour) approves the command and records a bypass rule for that session:
 
-- the rule is the invocation's normalized token prefix, including path-valued options such as `--kubeconfig` (with `~` expanded), so the target environment is part of the rule
-- trailing arguments are covered, but existing tokens cannot change: bypassing the prefix above also covers `kubectl --kubeconfig ~/.config/staging/kubeconfig delete pod foo --grace-period=0`, not a different pod name
+- an explicit, unambiguous kubectl `--kubeconfig` creates an environment scope: every otherwise-bypassable guarded kubectl command that explicitly uses the same normalized kubeconfig is covered for the duration
+- kubeconfig paths normalize relative components plus `~`, `$HOME`, and `${HOME}` forms, so equivalent references identify the same environment
+- a different kubeconfig or a kubectl command with no explicit kubeconfig remains guarded; the rule does not infer inherited `KUBECONFIG` or current-context state
+- other bypassable invocations, including kubectl commands without an explicit kubeconfig, retain narrow normalized command-prefix scope: existing tokens cannot change, though trailing arguments are covered
 - the rule only applies while the command runs in the blocked command's working directory or a subdirectory
 - commands the static policy already allows are never offered, and non-bypassable risks (`kubectl --raw`, `gcloud --flags-file`, Helm `--post-renderer`, invocation-local Git aliases) can never be bypassed
 - unparseable commands and compound commands with more than one guarded or unclassified operation produce no bypass offer
@@ -192,7 +194,7 @@ When a blocked command contains a single guarded invocation whose prefix identif
 Bypass rules apply uniformly to the `bash` tool, direct `exec_command` calls, and Code Mode nested calls.
 
 > [!WARNING]
-> Pauses and bypasses deliberately weaken the guard. A pause exposes every guarded tool, and a scoped bypass still covers every trailing argument under its prefix — including other resources in the same cluster or namespace. Prefer the narrowest prefix and shortest duration that covers the task.
+> Pauses and bypasses deliberately weaken the guard. A pause exposes every guarded tool. A kubeconfig-scoped bypass exposes every bypassable guarded kubectl operation that explicitly uses that kubeconfig from the selected repository subtree, which may include multiple contexts, clusters, namespaces, and resources. A command-prefix bypass covers every trailing argument under its prefix. Prefer the narrowest scope and shortest duration that covers the task.
 
 ## Code Mode integration
 
