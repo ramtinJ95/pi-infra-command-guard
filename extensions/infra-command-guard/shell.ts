@@ -1,4 +1,4 @@
-import { parse, type Command, type ParsedScript, type Word } from "unbash";
+import { parse, type Command, type Function as BashFunction, type ParsedScript, type Word } from "unbash";
 import { GUARDED_EXECUTABLES } from "./guarded-executables.ts";
 
 const GUARDED_PATTERNS = new Map<string, RegExp>();
@@ -199,23 +199,68 @@ function commandSegment(command: Command, shadowed: boolean): ShellSegment | und
 	};
 }
 
+function commandMayMutateFunctions(
+	value: unknown,
+	activeFunctions: ReadonlyMap<string, BashFunction>,
+	checkingFunctions = new Set<BashFunction>(),
+): boolean {
+	if (!value || typeof value !== "object") return false;
+	const record = value as Record<string, unknown>;
+	if (record.type === "Function") return true;
+	if (record.type === "Command") {
+		const command = value as Command;
+		if (!command.name) return false;
+		const name = command.name.value;
+		if (name.includes("$")) return true;
+		if (name === "." || name === "eval" || name === "source" || name === "unset") return true;
+		const target = activeFunctions.get(name);
+		if (!target || checkingFunctions.has(target)) return false;
+		checkingFunctions.add(target);
+		const mayMutate = commandMayMutateFunctions(target.body, activeFunctions, checkingFunctions);
+		checkingFunctions.delete(target);
+		return mayMutate;
+	}
+	for (const child of Object.values(record)) {
+		if (commandMayMutateFunctions(child, activeFunctions, checkingFunctions)) return true;
+	}
+	return false;
+}
+
+function removeUnsetFunctions(command: Command, activeFunctions: Map<string, BashFunction>): void {
+	const words = command.suffix.map((word) => word.value);
+	const variableOnly = words.some((word) => word === "-v" || word === "--variable");
+	const functionMode = words.some((word) => word === "-f" || word === "--function");
+	if (variableOnly && !functionMode) return;
+	for (const word of words) {
+		if (word === "--" || word.startsWith("-")) continue;
+		if (word.includes("$")) {
+			activeFunctions.clear();
+			return;
+		}
+		activeFunctions.delete(word);
+	}
+}
+
 function markDefinitelyShadowedCommands(script: ParsedScript, shadowedCommands: WeakSet<Command>): void {
-	const activeFunctions = new Set<string>();
+	const activeFunctions = new Map<string, BashFunction>();
 	for (const statement of script.commands) {
 		const node = statement.command;
 		if (node.type === "Function") {
 			const name = node.name.value;
-			if (name && !name.includes("/")) activeFunctions.add(stripPath(name));
+			if (name && !name.includes("/")) activeFunctions.set(name, node);
 			continue;
 		}
 		if (node.type !== "Command") {
-			activeFunctions.clear();
+			if (commandMayMutateFunctions(node, activeFunctions)) activeFunctions.clear();
 			continue;
 		}
 		if (!node.name) continue;
 		const name = node.name.value;
-		if (name && !name.includes("/") && activeFunctions.has(stripPath(name))) shadowedCommands.add(node);
-		activeFunctions.clear();
+		const activeFunction = activeFunctions.get(name);
+		if (activeFunction && !name.includes("/")) shadowedCommands.add(node);
+		if (name === "unset") removeUnsetFunctions(node, activeFunctions);
+		else if (name === "." || name === "eval" || name === "source") activeFunctions.clear();
+		else if (activeFunction && commandMayMutateFunctions(activeFunction.body, activeFunctions)) activeFunctions.clear();
 	}
 }
 

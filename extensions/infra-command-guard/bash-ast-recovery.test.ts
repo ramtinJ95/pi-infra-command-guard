@@ -57,8 +57,13 @@ test("Bash AST recovery distinguishes executable commands from complex-script da
 	assert.equal(evaluateCommand("echo $(kubectl delete pod api)", RELAXED).allow, false);
 	assert.equal(evaluateCommand("cat <<EOF\n$(kubectl patch pod api -p '{}')\nEOF", RELAXED).allow, false);
 	assert.equal(evaluateCommand("kubectl(){ printf '%s\\n' safe; }; kubectl delete pod api", RELAXED).allow, true);
+	assert.equal(evaluateCommand("kubectl(){ printf '%s\\n' safe; }; echo ready; kubectl delete pod api", RELAXED).allow, true);
+	assert.equal(evaluateCommand("kubectl(){ printf '%s\\n' safe; }; kubectl get pods; kubectl delete pod api", RELAXED).allow, true);
 	assert.equal(evaluateCommand("kubectl(){ printf '%s\\n' safe; }; /usr/bin/kubectl delete pod api", RELAXED).allow, false);
 	assert.equal(evaluateCommand("kubectl(){ printf '%s\\n' safe; }; command kubectl delete pod api", RELAXED).allow, false);
+	assert.equal(evaluateCommand("KUBECTL(){ printf '%s\\n' safe; }; kubectl delete pod api", RELAXED).allow, false);
+	assert.equal(evaluateCommand("kubectl(){ printf '%s\\n' safe; }; unset -f kubectl; kubectl delete pod api", RELAXED).allow, false);
+	assert.equal(evaluateCommand("kubectl(){ unset -f kubectl; }; kubectl; kubectl delete pod api", RELAXED).allow, false);
 });
 
 test("AST-recovered invocations preserve wrappers, paths, and non-bypassable rules", () => {
