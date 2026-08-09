@@ -194,16 +194,18 @@ function findMatchingBypassRule(
 ): MatchingInvocation | undefined {
 	const parsed = parseSimpleCommands(identity.command);
 	if ("error" in parsed) return undefined;
-	let candidate: MatchingInvocation | undefined;
+	const candidates: MatchingInvocation[] = [];
 	for (const segment of parsed.segments) {
+		if (evaluateCommand(segment.bare, settings).allow) continue;
 		const invocation = extractInvocation(segment.words);
-		if ("error" in invocation || !invocation.executable) continue;
+		if ("error" in invocation || !invocation.executable) return undefined;
 		const executable = invocation.executable as GuardedExecutable;
-		if (!(BYPASSABLE_EXECUTABLES as readonly string[]).includes(executable)) continue;
+		if (!(BYPASSABLE_EXECUTABLES as readonly string[]).includes(executable)) return undefined;
 		const match = invocationBypassCandidate(executable, invocation, settings);
-		if (match) candidate ??= match;
+		if (!match) return undefined;
+		candidates.push(match);
 	}
-	return candidate;
+	return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 export {

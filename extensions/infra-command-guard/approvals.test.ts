@@ -221,6 +221,36 @@ test("scoped bypass rules allow matching prefixes in the stored cwd only", () =>
 		).allow,
 		false,
 	);
+	for (const separator of ["&&", ";", "||", "|"]) {
+		for (const otherRisk of ["rm other-target", "terraform apply", "vault read secret/data/test"]) {
+			const compound = `kubectl --kubeconfig /tmp/kc delete pod foo ${separator} ${otherRisk}`;
+			assert.equal(
+				guardExecution(
+					store,
+					executionIdentity("bash", { command: compound }, "/repo")!,
+					"tui",
+					DEFAULT_COMMAND_POLICY_SETTINGS,
+					bypasses,
+				).allow,
+				false,
+				`a matching bypass must not authorize another guarded invocation: ${compound}`,
+			);
+		}
+	}
+	assert.deepEqual(
+		guardExecution(
+			store,
+			executionIdentity(
+				"bash",
+				{ command: "kubectl --kubeconfig /tmp/kc delete pod foo && printf safe" },
+				"/repo",
+			)!,
+			"tui",
+			DEFAULT_COMMAND_POLICY_SETTINGS,
+			bypasses,
+		),
+		{ allow: true },
+	);
 });
 
 test("unparseable commands and non-bypassable risks never produce a bypass offer", () => {

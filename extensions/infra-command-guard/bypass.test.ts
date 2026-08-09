@@ -79,6 +79,17 @@ test("findMatchingBypassRule matches through wrappers and compound segments", ()
 	assert.deepEqual(match.normalizedPrefix, ["--kubeconfig", "/tmp/kc", "delete", "pod", "foo"]);
 });
 
+test("findMatchingBypassRule refuses compound commands with multiple guarded risks", () => {
+	for (const command of [
+		"kubectl delete pod foo && rm other-target",
+		"kubectl delete pod foo && terraform apply",
+		"kubectl delete pod foo && $OTHER_COMMAND",
+	]) {
+		const identity = executionIdentity("bash", { command }, "/repo")!;
+		assert.equal(findMatchingBypassRule(identity, SETTINGS), undefined, command);
+	}
+});
+
 test("findMatchingBypassRule skips commands the static policy already allows", () => {
 	const identity = executionIdentity("bash", { command: "kubectl get pods" }, "/repo")!;
 	assert.equal(findMatchingBypassRule(identity, SETTINGS), undefined);
