@@ -30,7 +30,7 @@
     "approval"
   ],
   "dependencies": {
-    "unbash": "^4.0.10"
+    "unbash": "4.0.10"
   },
   "files": [
     "CHANGELOG.md",
