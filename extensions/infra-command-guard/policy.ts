@@ -220,20 +220,22 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 		: enabledExecutables.filter((executable) => INDIRECT_TEXT_GUARDS.has(executable));
 
 	for (const segment of segments) {
-		if (segment.shadowedExecutable) {
+		if (segment.shadowedExecutable && segment.forwardedWords === undefined) {
 			uncertainty ??= unclassified(
 				`This command resolves ${segment.shadowedExecutable} to a shell function, which requires manual approval`,
 			);
 			continue;
 		}
-		const invocation = extractInvocation(segment.words);
+		const segmentWords = segment.forwardedWords ?? segment.words;
+		const segmentBare = segment.forwardedBare ?? segment.bare;
+		const invocation = extractInvocation(segmentWords);
 		if ("error" in invocation) {
 			uncertainty ??= unclassified(`This command uses a wrapper the infra guard cannot classify safely (${invocation.error})`);
 			continue;
 		}
 
 		if (!invocation.executable) {
-			if (containsGuardedText(segment.words.join(" "), enabledExecutables)) {
+			if (containsGuardedText(segmentWords.join(" "), enabledExecutables)) {
 				uncertainty ??= unclassified("This command assigns guarded tooling for indirect shell execution, which requires manual approval");
 			}
 			continue;
@@ -249,7 +251,7 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 			continue;
 		}
 
-		const segmentText = segment.words.join(" ");
+		const segmentText = segmentWords.join(" ");
 		const segmentMentionsGuardedTool = containsGuardedText(segmentText, enabledExecutables);
 		if (SHELL_RUNNERS.has(invocation.executable) && segmentMentionsGuardedTool) {
 			uncertainty ??= unclassified(`This command delegates guarded execution through ${invocation.executable}, which requires manual approval`);
@@ -294,7 +296,7 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 			continue;
 		}
 
-		if (containsGuardedText(segment.bare, enabledIndirectTextGuards)) {
+		if (containsGuardedText(segmentBare, enabledIndirectTextGuards)) {
 			uncertainty ??= unclassified(
 				`This command invokes guarded tooling through ${invocation.executable}, which requires manual approval`,
 			);

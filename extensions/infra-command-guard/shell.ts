@@ -4,7 +4,14 @@ import { GUARDED_EXECUTABLES } from "./guarded-executables.ts";
 const GUARDED_PATTERNS = new Map<string, RegExp>();
 const DEFAULT_GUARDED_PATTERN = new RegExp(`\\b(?:${GUARDED_EXECUTABLES.join("|")})\\b`, "i");
 
-type ShellSegment = { words: string[]; rawWords: string[]; bare: string; shadowedExecutable?: string };
+type ShellSegment = {
+	words: string[];
+	rawWords: string[];
+	bare: string;
+	shadowedExecutable?: string;
+	forwardedWords?: string[];
+	forwardedBare?: string;
+};
 type ParsedCommands =
 	| { segments: ShellSegment[]; error?: undefined }
 	| { segments?: undefined; error: string };
@@ -186,7 +193,7 @@ function unquotedWordText(word: Word): string {
 		.join("");
 }
 
-function commandSegment(command: Command, shadowed: boolean): ShellSegment | undefined {
+function commandSegment(command: Command, shadowed: boolean, executesArguments: boolean): ShellSegment | undefined {
 	if (!command.name) return undefined;
 	const prefixWords = command.prefix.map((assignment) => assignment.text);
 	const commandWords = [command.name, ...command.suffix];
@@ -196,7 +203,45 @@ function commandSegment(command: Command, shadowed: boolean): ShellSegment | und
 		rawWords: [...prefixWords, ...commandWords.map((word) => word.text)],
 		bare: [...prefixWords, ...commandWords.map(unquotedWordText)].join(" "),
 		shadowedExecutable: shadowed && !directExecutable.includes("/") ? stripPath(directExecutable) : undefined,
+		forwardedWords: shadowed && executesArguments ? command.suffix.map((word) => word.value) : undefined,
+		forwardedBare: shadowed && executesArguments ? command.suffix.map(unquotedWordText).join(" ") : undefined,
 	};
+}
+
+const POSITIONAL_PARAMETER_PATTERN = /\$(?:[@*]|[1-9][0-9]*|\{(?:[@*]|[1-9][0-9]*)[^}]*\})/;
+
+function commandExecutesArguments(command: Command): boolean {
+	if (!command.name) return false;
+	const rawWords = [command.name, ...command.suffix].map((word) => word.text);
+	if (!rawWords.some((word) => POSITIONAL_PARAMETER_PATTERN.test(word))) return false;
+	const invocation = extractInvocation([command.name.value, ...command.suffix.map((word) => word.value)]);
+	if ("error" in invocation || !invocation.executable) return true;
+	if (POSITIONAL_PARAMETER_PATTERN.test(invocation.rawExecutable ?? invocation.executable)) return true;
+	if (SHELL_EXECUTION_BUILTINS.has(invocation.executable) || SHELL_RUNNERS.has(invocation.executable)) return true;
+	return invocation.executable === "find" && invocation.args.some((word) => ["-exec", "-execdir", "-ok", "-okdir"].includes(word));
+}
+
+function functionExecutesArguments(
+	value: unknown,
+	activeFunctions: ReadonlyMap<string, BashFunction>,
+	checkingFunctions = new Set<BashFunction>(),
+): boolean {
+	if (!value || typeof value !== "object") return false;
+	const record = value as Record<string, unknown>;
+	if (record.type === "Command") {
+		const command = value as Command;
+		if (commandExecutesArguments(command)) return true;
+		const target = command.name ? activeFunctions.get(command.name.value) : undefined;
+		if (!target || checkingFunctions.has(target)) return false;
+		checkingFunctions.add(target);
+		const executesArguments = functionExecutesArguments(target.body, activeFunctions, checkingFunctions);
+		checkingFunctions.delete(target);
+		return executesArguments;
+	}
+	for (const child of Object.values(record)) {
+		if (functionExecutesArguments(child, activeFunctions, checkingFunctions)) return true;
+	}
+	return false;
 }
 
 function commandMayMutateFunctions(
@@ -223,7 +268,7 @@ function commandMayMutateFunctions(
 		if (!invocation) return false;
 		const name = invocation.name;
 		if (name.includes("$")) return true;
-		if (name === "." || name === "eval" || name === "source" || name === "unset") return true;
+		if (name === "." || name === "eval" || name === "source" || name === "trap" || name === "unset") return true;
 		return false;
 	}
 	for (const child of Object.values(record)) {
@@ -260,7 +305,11 @@ function removeUnsetFunctions(words: readonly string[], activeFunctions: Map<str
 	}
 }
 
-function markDefinitelyShadowedCommands(script: ParsedScript, shadowedCommands: WeakSet<Command>): void {
+function markDefinitelyShadowedCommands(
+	script: ParsedScript,
+	shadowedCommands: WeakSet<Command>,
+	argumentForwardingCommands: WeakSet<Command>,
+): void {
 	const activeFunctions = new Map<string, BashFunction>();
 	for (const statement of script.commands) {
 		const node = statement.command;
@@ -278,12 +327,13 @@ function markDefinitelyShadowedCommands(script: ParsedScript, shadowedCommands: 
 		const activeFunction = activeFunctions.get(name);
 		if (activeFunction && !name.includes("/")) {
 			shadowedCommands.add(node);
+			if (functionExecutesArguments(activeFunction.body, activeFunctions)) argumentForwardingCommands.add(node);
 			if (commandMayMutateFunctions(activeFunction.body, activeFunctions)) activeFunctions.clear();
 			continue;
 		}
 		const invocation = staticShellBuiltinDispatch(node);
 		if (invocation?.name === "unset") removeUnsetFunctions(invocation.args, activeFunctions);
-		else if (invocation && (invocation.name === "." || invocation.name === "eval" || invocation.name === "source")) {
+		else if (invocation && [".", "eval", "source", "trap"].includes(invocation.name)) {
 			activeFunctions.clear();
 		}
 	}
@@ -300,6 +350,7 @@ function recoverAstCommands(command: string): RecoveredCommands {
 	let hasDynamic = false;
 	const seen = new WeakSet<object>();
 	const shadowedCommands = new WeakSet<Command>();
+	const argumentForwardingCommands = new WeakSet<Command>();
 
 	const visit = (value: unknown): void => {
 		if (!value || typeof value !== "object" || seen.has(value)) return;
@@ -308,7 +359,11 @@ function recoverAstCommands(command: string): RecoveredCommands {
 
 		if (record.type === "Command") {
 			const shellCommand = value as Command;
-			const segment = commandSegment(shellCommand, shadowedCommands.has(shellCommand));
+			const segment = commandSegment(
+				shellCommand,
+				shadowedCommands.has(shellCommand),
+				argumentForwardingCommands.has(shellCommand),
+			);
 			if (segment) {
 				segments.push(segment);
 				const invocation = extractInvocation(segment.words);
@@ -318,7 +373,7 @@ function recoverAstCommands(command: string): RecoveredCommands {
 
 		if (record.type === "Script") {
 			const script = value as ParsedScript;
-			markDefinitelyShadowedCommands(script, shadowedCommands);
+			markDefinitelyShadowedCommands(script, shadowedCommands, argumentForwardingCommands);
 			for (const error of script.errors ?? []) {
 				errors.push(`${error.message} at offset ${error.pos}`);
 			}
