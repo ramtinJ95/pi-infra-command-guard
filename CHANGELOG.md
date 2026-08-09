@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-09
+
 ### Fixed
 
 - Recover concrete guarded invocations from a Bash AST when complex syntax is outside the provenance parser, so known risks still require approval in classified-dangerous-only mode.
@@ -111,7 +113,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial infrastructure command guard with structured approval flow and CI packaging checks.
 
-[Unreleased]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.7.0...v0.8.0
