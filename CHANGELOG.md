@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover concrete guarded invocations from a Bash AST when complex syntax is outside the provenance parser, so known risks still require approval in classified-dangerous-only mode.
+
 ## [0.9.0] - 2026-08-09
 
 ### Added
