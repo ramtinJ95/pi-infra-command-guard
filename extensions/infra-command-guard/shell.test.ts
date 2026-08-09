@@ -43,9 +43,24 @@ test("shell parser and policy never throw for deterministic arbitrary input", ()
 
 test("find placeholders remain literal without enabling shell grouping syntax", () => {
 	assert.deepEqual(parseSimpleCommands("find . -exec echo {} \\;"), {
-		segments: [{ words: ["find", ".", "-exec", "echo", "{}", ";"], bare: "find . -exec echo {} ;" }],
+		segments: [{
+			words: ["find", ".", "-exec", "echo", "{}", ";"],
+			rawWords: ["find", ".", "-exec", "echo", "{}", "\\;"],
+			bare: "find . -exec echo {} ;",
+		}],
 	});
 	assert.match((parseSimpleCommands("{ echo grouped; }") as { error: string }).error, /grouping token/);
+});
+
+test("shell parsing preserves raw quote and escape provenance", () => {
+	const parsed = parseSimpleCommands(
+		String.raw`kubectl --kubeconfig "$HOME/kc" delete pod a && kubectl --kubeconfig \~/literal delete pod b`,
+	);
+	assert.ok(!("error" in parsed));
+	assert.deepEqual(parsed.segments[0].words, ["kubectl", "--kubeconfig", "$HOME/kc", "delete", "pod", "a"]);
+	assert.deepEqual(parsed.segments[0].rawWords, ["kubectl", "--kubeconfig", '"$HOME/kc"', "delete", "pod", "a"]);
+	assert.deepEqual(parsed.segments[1].words, ["kubectl", "--kubeconfig", "~/literal", "delete", "pod", "b"]);
+	assert.deepEqual(parsed.segments[1].rawWords, ["kubectl", "--kubeconfig", "\\~/literal", "delete", "pod", "b"]);
 });
 
 test("semantics-preserving shell variations cannot hide guarded mutations", () => {

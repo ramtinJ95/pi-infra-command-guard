@@ -129,7 +129,7 @@ After editing the file, have the user run `/infra-guard-notify-test`. Terminal p
 `extensions/infra-command-guard/index.ts` is composition only. Keep dependencies directed toward it; internal modules must not import `index.ts`.
 
 - `attention.ts`: JSON configuration, native and terminal notifications, Herdr routing, and custom sound
-- `shell.ts`: shell parsing, wrapper extraction, and indirect-execution detection
+- `shell.ts`: shell parsing with raw token provenance, wrapper extraction, and indirect-execution detection
 - `tool-policies.ts`: tool allowlists, evaluators, global-option normalization, and non-bypassable tool risks
 - `policy.ts`: guarded-command orchestration, custom command-rule matching, and stable policy exports
 - `approvals.ts`: execution identity, expiring one-time grants, and guard decisions

@@ -184,7 +184,7 @@ Run `/infra-guard` and choose `Pause guard…`, then pick 10 minutes, 30 minutes
 When a blocked command contains a single guarded invocation whose target can be scoped safely — for example `kubectl --kubeconfig ~/.config/staging/kubeconfig delete pod foo` — the approval overlay gains a third choice, `Approve & bypass … for…`. Picking a duration (10 minutes, 30 minutes, or 1 hour) approves the command and records a bypass rule for that session:
 
 - an explicit, unambiguous kubectl `--kubeconfig` creates an environment scope: every otherwise-bypassable guarded kubectl command that explicitly uses the same normalized kubeconfig is covered for the duration
-- kubeconfig paths normalize relative components plus `~`, `$HOME`, and `${HOME}` forms, so equivalent references identify the same environment
+- kubeconfig paths normalize relative components plus shell-expanded `~`, `$HOME`, and `${HOME}` forms while preserving quote/escape provenance; literal quoted/escaped home markers do not share authority with expanded paths
 - a different kubeconfig or a kubectl command with no explicit kubeconfig remains guarded; the rule does not infer inherited `KUBECONFIG` or current-context state
 - other bypassable invocations, including kubectl commands without an explicit kubeconfig, retain narrow normalized command-prefix scope: existing tokens cannot change, though trailing arguments are covered
 - ambiguous, repeated, dynamic, or cwd-uncertain kubeconfig forms receive no bypass offer rather than falling back to a weaker scope

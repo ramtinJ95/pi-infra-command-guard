@@ -93,6 +93,33 @@ test("findMatchingBypassRule scopes kubectl to its normalized kubeconfig", () =>
 	assert.deepEqual(attached?.scope, { kind: "kubectl-kubeconfig", path: "/repo/kc" });
 });
 
+test("kubeconfig normalization follows shell expansion provenance", () => {
+	for (const command of [
+		"kubectl --kubeconfig '~/kc' delete pod foo",
+		'kubectl --kubeconfig "~/kc" delete pod foo',
+		"kubectl --kubeconfig \\~/kc delete pod foo",
+		"kubectl --kubeconfig=~/kc delete pod foo",
+		"kubectl --kubeconfig '$HOME/kc' delete pod foo",
+		'kubectl --kubeconfig="$HOME/kc" delete pod foo',
+	]) {
+		assert.equal(
+			findMatchingBypassRule(executionIdentity("bash", { command }, "/repo")!, SETTINGS),
+			undefined,
+			command,
+		);
+	}
+	for (const command of [
+		"kubectl --kubeconfig /tmp/kc delete pod foo",
+		"kubectl --kubeconfig '/tmp/kc' delete pod foo",
+		"kubectl --kubeconfig=/tmp/kc delete pod foo",
+		"kubectl --kubeconfig $HOME/kc delete pod foo",
+		'kubectl --kubeconfig "$HOME/kc" delete pod foo',
+	]) {
+		const match = findMatchingBypassRule(executionIdentity("bash", { command }, "/repo")!, SETTINGS);
+		assert.equal(match?.scope.kind, "kubectl-kubeconfig", command);
+	}
+});
+
 test("findMatchingBypassRule matches through wrappers and compound segments", () => {
 	const identity = executionIdentity(
 		"bash",
