@@ -245,7 +245,7 @@ function kubectlKubeconfigScope(
 	args: readonly string[],
 	rawArgs: readonly string[],
 	cwd: string,
-	homeOverride: boolean,
+	homeUncertain: boolean,
 ): KubectlKubeconfigResult {
 	let value: string | undefined;
 	let rawValue: string | undefined;
@@ -272,7 +272,7 @@ function kubectlKubeconfigScope(
 		rawValue = rawCandidate;
 	}
 	if (value === undefined || rawValue === undefined) return { kind: "absent" };
-	if (isHomeReference(value) && homeOverride) return { kind: "invalid" };
+	if (isHomeReference(value) && homeUncertain) return { kind: "invalid" };
 	const normalized = normalizeKubeconfigPath(value, rawValue, attached, cwd);
 	if (!normalized) return { kind: "invalid" };
 	return { kind: "scope", scope: { kind: "kubectl-kubeconfig", path: normalized } };
@@ -302,6 +302,28 @@ function hasHomeOverride(words: readonly string[]): boolean {
 	return words.some((word) => /^HOME=/.test(word));
 }
 
+function makesHomeUncertain(invocation: Invocation, segmentWords: readonly string[]): boolean {
+	if (hasHomeOverride(segmentWords)) return true;
+	if (invocation.executable === "unset") {
+		return invocation.args.some((word) => word === "HOME");
+	}
+	if (!invocation.wrappers.includes("env") || !invocation.rawExecutable) return false;
+	const executableIndex = segmentWords.indexOf(invocation.rawExecutable);
+	if (executableIndex <= 0) return false;
+	const wrapperWords = segmentWords.slice(0, executableIndex);
+	for (let index = 0; index < wrapperWords.length; index += 1) {
+		const word = wrapperWords[index];
+		if (word === "-i" || word === "--ignore-environment") return true;
+		if (word === "-u" || word === "--unset") {
+			if (wrapperWords[index + 1] === "HOME") return true;
+			index += 1;
+			continue;
+		}
+		if (word === "--unset=HOME") return true;
+	}
+	return false;
+}
+
 function hasCwdChangingWrapper(invocation: Invocation, segmentWords: readonly string[]): boolean {
 	if (!invocation.rawExecutable) return false;
 	const executableIndex = segmentWords.indexOf(invocation.rawExecutable);
@@ -319,7 +341,7 @@ function invocationBypassCandidate(
 	rawArgs: readonly string[],
 	settings: CommandPolicySettings,
 	cwd: string,
-	homeOverride: boolean,
+	homeUncertain: boolean,
 ): MatchingInvocation | undefined {
 	const guardSettings = settings.guards;
 	if (!guardSettings[executable]) return undefined;
@@ -327,9 +349,9 @@ function invocationBypassCandidate(
 	if (decision.allow) return undefined;
 	const nonBypassable = evaluateNonBypassableRisk(executable, invocation);
 	if (nonBypassable && nonBypassable.basis !== "unclassified") return undefined;
-	if (homeOverride && invocation.args.some(isHomeReference)) return undefined;
+	if (homeUncertain && invocation.args.some(isHomeReference)) return undefined;
 	if (executable === "kubectl") {
-		const kubeconfig = kubectlKubeconfigScope(invocation.args, rawArgs, cwd, homeOverride);
+		const kubeconfig = kubectlKubeconfigScope(invocation.args, rawArgs, cwd, homeUncertain);
 		if (kubeconfig.kind === "invalid") return undefined;
 		if (kubeconfig.kind === "scope") return { executable, scope: kubeconfig.scope };
 	}
@@ -346,11 +368,11 @@ function findMatchingBypassRule(
 	if ("error" in parsed) return undefined;
 	const candidates: MatchingInvocation[] = [];
 	let cwdUncertain = false;
-	let homeOverride = false;
+	let homeUncertain = false;
 	for (const segment of parsed.segments) {
 		const invocation = extractInvocation(segment.words);
 		if ("error" in invocation || !invocation.executable) return undefined;
-		homeOverride ||= hasHomeOverride(segment.words);
+		homeUncertain ||= makesHomeUncertain(invocation, segment.words);
 		const segmentChangesCwd = invocation.executable === "cd" || invocation.executable === "pushd" || invocation.executable === "popd";
 		if (evaluateCommand(segment.bare, settings).allow) {
 			cwdUncertain ||= segmentChangesCwd;
@@ -360,7 +382,7 @@ function findMatchingBypassRule(
 		const executable = invocation.executable as GuardedExecutable;
 		if (!(BYPASSABLE_EXECUTABLES as readonly string[]).includes(executable)) return undefined;
 		const rawArgs = segment.rawWords.slice(segment.rawWords.length - invocation.args.length);
-		const match = invocationBypassCandidate(executable, invocation, rawArgs, settings, identity.cwd, homeOverride);
+		const match = invocationBypassCandidate(executable, invocation, rawArgs, settings, identity.cwd, homeUncertain);
 		if (!match) return undefined;
 		candidates.push(match);
 	}

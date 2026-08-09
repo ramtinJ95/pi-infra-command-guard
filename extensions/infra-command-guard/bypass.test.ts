@@ -155,6 +155,12 @@ test("kubeconfig scope rejects HOME overrides and uncertain effective cwd", () =
 	for (const command of [
 		'HOME=/other kubectl --kubeconfig "$HOME/kc" delete pod foo',
 		'env HOME=/other kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'unset HOME && kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'unset -v HOME && kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'export HOME=/other && kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'env -u HOME kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'env --unset=HOME kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'env -i kubectl --kubeconfig "$HOME/kc" delete pod foo',
 		"cd /other && kubectl --kubeconfig relative/kc delete pod foo",
 		"pushd /other && kubectl --kubeconfig relative/kc delete pod foo",
 		"env -C /other kubectl --kubeconfig relative/kc delete pod foo",
