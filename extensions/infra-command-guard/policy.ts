@@ -220,6 +220,12 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 		: enabledExecutables.filter((executable) => INDIRECT_TEXT_GUARDS.has(executable));
 
 	for (const segment of segments) {
+		if (segment.shadowedExecutable) {
+			uncertainty ??= unclassified(
+				`This command resolves ${segment.shadowedExecutable} to a shell function, which requires manual approval`,
+			);
+			continue;
+		}
 		const invocation = extractInvocation(segment.words);
 		if ("error" in invocation) {
 			uncertainty ??= unclassified(`This command uses a wrapper the infra guard cannot classify safely (${invocation.error})`);
@@ -240,13 +246,6 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 
 		if (SHELL_EXECUTION_BUILTINS.has(invocation.executable)) {
 			uncertainty ??= unclassified(`This command uses shell execution syntax (${invocation.executable}), which requires manual approval`);
-			continue;
-		}
-
-		if (segment.shadowedExecutable === invocation.executable && invocation.wrappers.length === 0) {
-			uncertainty ??= unclassified(
-				`This command resolves ${invocation.executable} to a shell function, which requires manual approval`,
-			);
 			continue;
 		}
 

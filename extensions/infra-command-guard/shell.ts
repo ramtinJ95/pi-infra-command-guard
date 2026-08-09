@@ -210,15 +210,21 @@ function commandMayMutateFunctions(
 	if (record.type === "Command") {
 		const command = value as Command;
 		if (!command.name) return false;
-		const name = command.name.value;
+		const directName = command.name.value;
+		const target = activeFunctions.get(directName);
+		if (target) {
+			if (checkingFunctions.has(target)) return false;
+			checkingFunctions.add(target);
+			const mayMutate = commandMayMutateFunctions(target.body, activeFunctions, checkingFunctions);
+			checkingFunctions.delete(target);
+			return mayMutate;
+		}
+		const invocation = staticShellBuiltinDispatch(command);
+		if (!invocation) return false;
+		const name = invocation.name;
 		if (name.includes("$")) return true;
 		if (name === "." || name === "eval" || name === "source" || name === "unset") return true;
-		const target = activeFunctions.get(name);
-		if (!target || checkingFunctions.has(target)) return false;
-		checkingFunctions.add(target);
-		const mayMutate = commandMayMutateFunctions(target.body, activeFunctions, checkingFunctions);
-		checkingFunctions.delete(target);
-		return mayMutate;
+		return false;
 	}
 	for (const child of Object.values(record)) {
 		if (commandMayMutateFunctions(child, activeFunctions, checkingFunctions)) return true;
@@ -226,8 +232,21 @@ function commandMayMutateFunctions(
 	return false;
 }
 
-function removeUnsetFunctions(command: Command, activeFunctions: Map<string, BashFunction>): void {
-	const words = command.suffix.map((word) => word.value);
+function staticShellBuiltinDispatch(command: Command): { name: string; args: string[] } | undefined {
+	if (!command.name) return undefined;
+	const words = [command.name.value, ...command.suffix.map((word) => word.value)];
+	let index = 0;
+	while (words[index] === "builtin" || words[index] === "command") {
+		const wrapper = words[index];
+		index += 1;
+		while (words[index] === "--" || (wrapper === "command" && words[index] === "-p")) index += 1;
+		if (wrapper === "command" && (words[index] === "-v" || words[index] === "-V")) return undefined;
+	}
+	const name = words[index];
+	return name ? { name, args: words.slice(index + 1) } : undefined;
+}
+
+function removeUnsetFunctions(words: readonly string[], activeFunctions: Map<string, BashFunction>): void {
 	const variableOnly = words.some((word) => word === "-v" || word === "--variable");
 	const functionMode = words.some((word) => word === "-f" || word === "--function");
 	if (variableOnly && !functionMode) return;
@@ -257,10 +276,16 @@ function markDefinitelyShadowedCommands(script: ParsedScript, shadowedCommands: 
 		if (!node.name) continue;
 		const name = node.name.value;
 		const activeFunction = activeFunctions.get(name);
-		if (activeFunction && !name.includes("/")) shadowedCommands.add(node);
-		if (name === "unset") removeUnsetFunctions(node, activeFunctions);
-		else if (name === "." || name === "eval" || name === "source") activeFunctions.clear();
-		else if (activeFunction && commandMayMutateFunctions(activeFunction.body, activeFunctions)) activeFunctions.clear();
+		if (activeFunction && !name.includes("/")) {
+			shadowedCommands.add(node);
+			if (commandMayMutateFunctions(activeFunction.body, activeFunctions)) activeFunctions.clear();
+			continue;
+		}
+		const invocation = staticShellBuiltinDispatch(node);
+		if (invocation?.name === "unset") removeUnsetFunctions(invocation.args, activeFunctions);
+		else if (invocation && (invocation.name === "." || invocation.name === "eval" || invocation.name === "source")) {
+			activeFunctions.clear();
+		}
 	}
 }
 
