@@ -308,10 +308,8 @@ function normalizeKubeconfigPath(value: string, rawValue: string, attached: bool
 
 function invocationMakesHomeUncertain(invocation: Invocation, segmentWords: readonly string[]): boolean {
 	if (segmentWords.some((word) => /^HOME=/.test(word))) return true;
-	if (!invocation.wrappers.includes("env") || !invocation.rawExecutable) return false;
-	const executableIndex = segmentWords.indexOf(invocation.rawExecutable);
-	if (executableIndex <= 0) return false;
-	const wrapperWords = segmentWords.slice(0, executableIndex);
+	if (!invocation.wrappers.includes("env")) return false;
+	const wrapperWords = invocationWrapperWords(invocation, segmentWords);
 	for (let index = 0; index < wrapperWords.length; index += 1) {
 		const word = wrapperWords[index];
 		if (word === "-i" || word === "--ignore-environment") return true;
@@ -326,14 +324,16 @@ function invocationMakesHomeUncertain(invocation: Invocation, segmentWords: read
 }
 
 function hasCwdChangingWrapper(invocation: Invocation, segmentWords: readonly string[]): boolean {
-	if (!invocation.rawExecutable) return false;
-	const executableIndex = segmentWords.indexOf(invocation.rawExecutable);
-	if (executableIndex <= 0) return false;
-	const wrapperWords = segmentWords.slice(0, executableIndex);
+	const wrapperWords = invocationWrapperWords(invocation, segmentWords);
 	return wrapperWords.some((word) => {
 		const name = word.includes("=") ? word.slice(0, word.indexOf("=")) : word;
 		return name === "-C" || name === "-D" || name === "--chdir";
 	});
+}
+
+function invocationWrapperWords(invocation: Invocation, segmentWords: readonly string[]): readonly string[] {
+	const executableIndex = segmentWords.length - invocation.words.length;
+	return executableIndex > 0 ? segmentWords.slice(0, executableIndex) : [];
 }
 
 function invocationBypassCandidate(

@@ -155,6 +155,8 @@ test("home-derived kubeconfig scopes reject uncertain shell environments", () =>
 	for (const command of [
 		'HOME=/other kubectl --kubeconfig "$HOME/kc" delete pod foo',
 		'env -u HOME kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'env -u kubectl -u HOME kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'env --unset kubectl --unset HOME kubectl --kubeconfig "$HOME/kc" delete pod foo',
 		'printf -v HOME /other && kubectl --kubeconfig "$HOME/kc" delete pod foo',
 		'read HOME < /tmp/value && kubectl --kubeconfig "$HOME/kc" delete pod foo',
 		'echo ready && kubectl --kubeconfig "$HOME/kc" delete pod foo',
