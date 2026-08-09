@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import {
-	PREFLIGHT_BROKER_AVAILABLE_CHANNEL,
-	PREFLIGHT_BROKER_REQUEST_CHANNEL,
 	registerCodeModeToolPreflight,
 	type CodeModeToolPreflight,
-	type CodeModeToolPreflightBroker,
 } from "./code-mode.ts";
 import { test } from "./test-harness.ts";
+
+const PREFLIGHT_PROTOCOL =
+	"@howaboua/pi-codex-conversion/code-mode-preflight/v1";
+const PREFLIGHT_REQUEST_CHANNEL = `${PREFLIGHT_PROTOCOL}/request`;
+const PREFLIGHT_AVAILABLE_CHANNEL = `${PREFLIGHT_PROTOCOL}/available`;
 
 function createTestApis() {
 	const listeners = new Map<string, Set<(data: unknown) => void>>();
@@ -39,25 +41,25 @@ function createTestApis() {
 }
 
 function createBroker(pi: ReturnType<ReturnType<typeof createTestApis>>["pi"]) {
-	const handlers = new Map<object, CodeModeToolPreflight>();
+	const handlers = new Set<CodeModeToolPreflight>();
 	let active = true;
-	const broker: CodeModeToolPreflightBroker = {
-		version: 1,
+	const broker = {
+		protocol: PREFLIGHT_PROTOCOL,
 		isActive: () => active,
-		register(id, handler) {
-			handlers.set(id, handler);
-			return () => handlers.delete(id);
+		register(handler: CodeModeToolPreflight) {
+			handlers.add(handler);
+			return () => handlers.delete(handler);
 		},
 	};
-	const stopRequests = pi.events.on(PREFLIGHT_BROKER_REQUEST_CHANNEL, (request) => {
+	const stopRequests = pi.events.on(PREFLIGHT_REQUEST_CHANNEL, (request) => {
 		if (
 			request &&
 			typeof request === "object" &&
-			"connect" in request &&
-			typeof request.connect === "function"
-		) request.connect(broker);
+			"protocol" in request &&
+			request.protocol === PREFLIGHT_PROTOCOL
+		) pi.events.emit(PREFLIGHT_AVAILABLE_CHANNEL, broker);
 	});
-	pi.events.emit(PREFLIGHT_BROKER_AVAILABLE_CHANNEL, broker);
+	pi.events.emit(PREFLIGHT_AVAILABLE_CHANNEL, broker);
 	return {
 		handlers,
 		shutdown() {
@@ -69,14 +71,13 @@ function createBroker(pi: ReturnType<ReturnType<typeof createTestApis>>["pi"]) {
 }
 
 for (const order of ["broker-first", "guard-first"] as const) {
-	test(`Code Mode guard preflight connects through isolated Pi 0.84 event facades (${order})`, async () => {
+	test(`Code Mode guard uses the published preflight API across Pi 0.84 event facades (${order})`, async () => {
 		const createPi = createTestApis();
 		const codeMode = createPi();
 		const guard = createPi();
 		assert.notEqual(codeMode.pi.events, guard.pi.events);
 		let broker: ReturnType<typeof createBroker>;
-		let registration: ReturnType<typeof registerCodeModeToolPreflight>;
-		const registerGuard = () => registerCodeModeToolPreflight(
+		const registration = registerCodeModeToolPreflight(
 			guard.pi as never,
 			(call) => call.toolName === "exec_command"
 				? { block: true, reason: "blocked by guard" }
@@ -84,21 +85,23 @@ for (const order of ["broker-first", "guard-first"] as const) {
 		);
 		if (order === "broker-first") {
 			broker = createBroker(codeMode.pi);
-			registration = registerGuard();
+			await registration.ready;
 		} else {
-			registration = registerGuard();
+			await registration.ready;
 			assert.equal(registration.isAvailable(), false);
 			broker = createBroker(codeMode.pi);
 		}
 
 		assert.equal(registration.isAvailable(), true);
-		const handler = [...broker.handlers.values()][0]!;
+		const handler = [...broker.handlers][0]!;
+		const extensionContext = { cwd: "/tmp", mode: "tui" } as never;
 		assert.deepEqual(
 			await handler({
 				toolName: "exec_command",
 				toolCallId: "nested-1",
 				input: { cmd: "rm target" },
 				cwd: "/tmp",
+				extensionContext,
 				signal: new AbortController().signal,
 			}),
 			{ block: true, reason: "blocked by guard" },
@@ -109,6 +112,7 @@ for (const order of ["broker-first", "guard-first"] as const) {
 				toolCallId: "nested-2",
 				input: "patch",
 				cwd: "/tmp",
+				extensionContext,
 				signal: new AbortController().signal,
 			}),
 			undefined,
@@ -121,12 +125,13 @@ for (const order of ["broker-first", "guard-first"] as const) {
 	});
 }
 
-test("Code Mode guard ignores incompatible preflight brokers", () => {
+test("Code Mode guard ignores incompatible published preflight brokers", async () => {
 	const createPi = createTestApis();
 	const guard = createPi();
 	const registration = registerCodeModeToolPreflight(guard.pi as never, () => undefined);
-	guard.pi.events.emit(PREFLIGHT_BROKER_AVAILABLE_CHANNEL, {
-		version: 2,
+	await registration.ready;
+	guard.pi.events.emit(PREFLIGHT_AVAILABLE_CHANNEL, {
+		protocol: "@howaboua/pi-codex-conversion/code-mode-preflight/v2",
 		isActive: () => true,
 		register() { return () => {}; },
 	});

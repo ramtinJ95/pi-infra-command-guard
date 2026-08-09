@@ -196,11 +196,11 @@ Bypass rules apply uniformly to the `bash` tool, direct `exec_command` calls, an
 
 ## Code Mode integration
 
-The integration registers an awaited nested-tool preflight through Pi's public cross-extension event bus. Code Mode resolves the JavaScript tool name and input first, then runs the guard before invoking `exec_command`, so commands assembled at runtime are covered without parsing the outer JavaScript source.
+The integration dynamically loads the official `@howaboua/pi-codex-conversion/code-mode-preflight` API. Code Mode resolves the JavaScript tool name and input first, then runs the guard before invoking `exec_command`, so commands assembled at runtime are covered without parsing the outer JavaScript source.
 
 The guard verifies that a compatible preflight broker is connected before every outer `exec` or `wait`. If Code Mode is absent or too old to expose the supported API, the outer call is blocked instead of silently running unguarded. Other nested Code Mode tools pass through unchanged.
 
-This integration is validated with Pi 0.84.1 and requires a `@howaboua/pi-codex-conversion` release containing the Code Mode nested-tool preflight API. Normal Pi `bash` and structured `exec_command` guarding do not require Code Mode.
+This integration is validated with Pi 0.84.1 and `@howaboua/pi-codex-conversion` 3.0.12. Code Mode guarding requires conversion 3.0.11 or newer. The conversion package is an optional peer: normal Pi `bash` and structured `exec_command` guarding continue to work when Code Mode is not installed.
 
 ## Configuration
 

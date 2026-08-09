@@ -4,11 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { APPROVAL_STORE_KEY, BYPASS_STORE_KEY } from "./approvals.ts";
 import {
-	PREFLIGHT_BROKER_AVAILABLE_CHANNEL,
-	PREFLIGHT_BROKER_REQUEST_CHANNEL,
 	type CodeModeToolCall,
 	type CodeModeToolPreflight,
-	type CodeModeToolPreflightBroker,
 } from "./code-mode.ts";
 import createExtension from "./index.ts";
 import { test } from "./test-harness.ts";
@@ -32,6 +29,11 @@ const ALL_GUARDS_DISABLED = {
 	truncate: false,
 	unlink: false,
 };
+
+const PREFLIGHT_PROTOCOL =
+	"@howaboua/pi-codex-conversion/code-mode-preflight/v1";
+const PREFLIGHT_REQUEST_CHANNEL = `${PREFLIGHT_PROTOCOL}/request`;
+const PREFLIGHT_AVAILABLE_CHANNEL = `${PREFLIGHT_PROTOCOL}/available`;
 
 function createTestEventBus() {
 	const listeners = new Map<string, Set<(data: unknown) => void>>();
@@ -70,25 +72,25 @@ function createHarness(events: EventFacade) {
 }
 
 function createPreflightBroker(events: EventFacade) {
-	const handlers = new Map<object, CodeModeToolPreflight>();
+	const handlers = new Set<CodeModeToolPreflight>();
 	let active = true;
-	const broker: CodeModeToolPreflightBroker = {
-		version: 1,
+	const broker = {
+		protocol: PREFLIGHT_PROTOCOL,
 		isActive: () => active,
-		register(id, handler) {
-			handlers.set(id, handler);
-			return () => handlers.delete(id);
+		register(handler: CodeModeToolPreflight) {
+			handlers.add(handler);
+			return () => handlers.delete(handler);
 		},
 	};
-	const stopRequests = events.on(PREFLIGHT_BROKER_REQUEST_CHANNEL, (request) => {
+	const stopRequests = events.on(PREFLIGHT_REQUEST_CHANNEL, (request) => {
 		if (
 			request &&
 			typeof request === "object" &&
-			"connect" in request &&
-			typeof request.connect === "function"
-		) request.connect(broker);
+			"protocol" in request &&
+			request.protocol === PREFLIGHT_PROTOCOL
+		) events.emit(PREFLIGHT_AVAILABLE_CHANNEL, broker);
 	});
-	events.emit(PREFLIGHT_BROKER_AVAILABLE_CHANNEL, broker);
+	events.emit(PREFLIGHT_AVAILABLE_CHANNEL, broker);
 	return {
 		handlers,
 		shutdown() {
@@ -97,6 +99,14 @@ function createPreflightBroker(events: EventFacade) {
 			stopRequests();
 		},
 	};
+}
+
+async function waitForPreflight(broker: ReturnType<typeof createPreflightBroker>) {
+	for (let attempt = 0; attempt < 20 && broker.handlers.size === 0; attempt += 1) {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	assert.equal(broker.handlers.size, 1);
+	return [...broker.handlers][0]!;
 }
 
 function nestedCall(cmd: string): CodeModeToolCall {
@@ -127,18 +137,26 @@ test("extension allows outer Code Mode calls only after its nested preflight con
 	const bus = createTestEventBus();
 	const broker = createPreflightBroker(bus.facade());
 	const { handlers } = createHarness(bus.facade());
+	const preflight = await waitForPreflight(broker);
 	const toolCall = handlers.get("tool_call")![0]!;
 	const context = { cwd: "/tmp", mode: "tui" };
 	assert.equal(
 		await toolCall({ toolName: "exec", input: { code: "dynamic" } }, context),
 		undefined,
 	);
-	const preflight = [...broker.handlers.values()][0]!;
 	const blocked = await preflight(nestedCall("rm guarded-target"));
 	assert.equal(blocked?.block, true);
 	assert.match(blocked?.reason ?? "", /Approval request:/);
 	assert.equal(
 		await preflight({ ...nestedCall("ignored"), toolName: "apply_patch" }),
+		undefined,
+	);
+	assert.equal(
+		await preflight({
+			...nestedCall("ignored"),
+			toolName: "write_stdin",
+			input: { session_id: 42, chars: "input\n" },
+		}),
 		undefined,
 	);
 	broker.shutdown();
@@ -148,13 +166,12 @@ test("Code Mode preflight registrations switch safely across guard reloads", asy
 	const bus = createTestEventBus();
 	const broker = createPreflightBroker(bus.facade());
 	const first = createHarness(bus.facade());
-	assert.equal(broker.handlers.size, 1);
+	await waitForPreflight(broker);
 	for (const handler of first.handlers.get("session_shutdown") ?? []) await handler({}, {});
 	assert.equal(broker.handlers.size, 0);
 
 	const second = createHarness(bus.facade());
-	assert.equal(broker.handlers.size, 1);
-	const preflight = [...broker.handlers.values()][0]!;
+	const preflight = await waitForPreflight(broker);
 	const blocked = await preflight(nestedCall("rm after-reload"));
 	assert.equal(blocked?.block, true);
 	assert.match(blocked?.reason ?? "", /Approval request:/);
@@ -355,7 +372,7 @@ test("Code Mode reloads guard toggles and command rules without losing preflight
 		const bus = createTestEventBus();
 		const broker = createPreflightBroker(bus.facade());
 		createHarness(bus.facade());
-		const preflight = [...broker.handlers.values()][0]!;
+		const preflight = await waitForPreflight(broker);
 
 		writeFileSync(configPath, JSON.stringify({ guards: ALL_GUARDS_DISABLED }));
 		assert.equal(await preflight(nestedCall("rm disabled")), undefined);
