@@ -11,6 +11,7 @@ type ShellSegment = {
 	shadowedExecutable?: string;
 	forwardedWords?: string[];
 	forwardedBare?: string;
+	opaqueArgumentText?: string;
 };
 type ParsedCommands =
 	| { segments: ShellSegment[]; error?: undefined }
@@ -193,7 +194,12 @@ function unquotedWordText(word: Word): string {
 		.join("");
 }
 
-function commandSegment(command: Command, shadowed: boolean, executesArguments: boolean): ShellSegment | undefined {
+function commandSegment(
+	command: Command,
+	shadowed: boolean,
+	forwardingPrefix: string[] | undefined,
+	opaqueArgumentText: string | undefined,
+): ShellSegment | undefined {
 	if (!command.name) return undefined;
 	const prefixWords = command.prefix.map((assignment) => assignment.text);
 	const commandWords = [command.name, ...command.suffix];
@@ -203,8 +209,13 @@ function commandSegment(command: Command, shadowed: boolean, executesArguments: 
 		rawWords: [...prefixWords, ...commandWords.map((word) => word.text)],
 		bare: [...prefixWords, ...commandWords.map(unquotedWordText)].join(" "),
 		shadowedExecutable: shadowed && !directExecutable.includes("/") ? stripPath(directExecutable) : undefined,
-		forwardedWords: shadowed && executesArguments ? command.suffix.map((word) => word.value) : undefined,
-		forwardedBare: shadowed && executesArguments ? command.suffix.map(unquotedWordText).join(" ") : undefined,
+		forwardedWords: shadowed && forwardingPrefix
+			? [...forwardingPrefix, ...command.suffix.map((word) => word.value)]
+			: undefined,
+		forwardedBare: shadowed && forwardingPrefix
+			? [...forwardingPrefix, ...command.suffix.map(unquotedWordText)].join(" ")
+			: undefined,
+		opaqueArgumentText: shadowed ? opaqueArgumentText : undefined,
 	};
 }
 
@@ -218,7 +229,39 @@ function commandExecutesArguments(command: Command): boolean {
 	if ("error" in invocation || !invocation.executable) return true;
 	if (POSITIONAL_PARAMETER_PATTERN.test(invocation.rawExecutable ?? invocation.executable)) return true;
 	if (SHELL_EXECUTION_BUILTINS.has(invocation.executable) || SHELL_RUNNERS.has(invocation.executable)) return true;
+	if (GUARDED_EXECUTABLES.includes(invocation.executable as (typeof GUARDED_EXECUTABLES)[number])) return true;
 	return invocation.executable === "find" && invocation.args.some((word) => ["-exec", "-execdir", "-ok", "-okdir"].includes(word));
+}
+
+function exactArgumentForwardingPrefix(value: unknown): string[] | undefined {
+	let prefix: string[] | undefined;
+	let ambiguous = false;
+	const visit = (node: unknown): void => {
+		if (ambiguous || !node || typeof node !== "object") return;
+		const record = node as Record<string, unknown>;
+		if (record.type === "Command") {
+			const command = node as Command;
+			const directName = command.name?.value;
+			if (directName === "shift" || (directName === "set" && command.suffix.some((word) => word.value === "--"))) {
+				ambiguous = true;
+				return;
+			}
+			const words = command.name ? [command.name, ...command.suffix] : [];
+			const positionalIndex = words.findIndex((word) => ["$@", '"$@"', "${@}", '"${@}"'].includes(word.text));
+			if (positionalIndex !== -1) {
+				if (positionalIndex !== words.length - 1 || prefix) {
+					ambiguous = true;
+					return;
+				}
+				const candidate = words.slice(0, positionalIndex).map((word) => word.value);
+				prefix = candidate[0] === "exec" ? candidate.slice(1) : candidate;
+			}
+			return;
+		}
+		for (const child of Object.values(record)) visit(child);
+	};
+	visit(value);
+	return ambiguous ? undefined : prefix;
 }
 
 function functionExecutesArguments(
@@ -244,37 +287,45 @@ function functionExecutesArguments(
 	return false;
 }
 
-function commandMayMutateFunctions(
+type FunctionMutationEffect = "none" | "direct" | "persistent";
+
+function strongerMutation(left: FunctionMutationEffect, right: FunctionMutationEffect): FunctionMutationEffect {
+	if (left === "persistent" || right === "persistent") return "persistent";
+	if (left === "direct" || right === "direct") return "direct";
+	return "none";
+}
+
+function functionMutationEffect(
 	value: unknown,
 	activeFunctions: ReadonlyMap<string, BashFunction>,
 	checkingFunctions = new Set<BashFunction>(),
-): boolean {
-	if (!value || typeof value !== "object") return false;
+): FunctionMutationEffect {
+	if (!value || typeof value !== "object") return "none";
 	const record = value as Record<string, unknown>;
-	if (record.type === "Function") return true;
+	if (record.type === "Function") return "direct";
 	if (record.type === "Command") {
 		const command = value as Command;
-		if (!command.name) return false;
+		if (!command.name) return "none";
 		const directName = command.name.value;
 		const target = activeFunctions.get(directName);
 		if (target) {
-			if (checkingFunctions.has(target)) return false;
+			if (checkingFunctions.has(target)) return "none";
 			checkingFunctions.add(target);
-			const mayMutate = commandMayMutateFunctions(target.body, activeFunctions, checkingFunctions);
+			const effect = functionMutationEffect(target.body, activeFunctions, checkingFunctions);
 			checkingFunctions.delete(target);
-			return mayMutate;
+			return effect;
 		}
 		const invocation = staticShellBuiltinDispatch(command);
-		if (!invocation) return false;
+		if (!invocation) return "none";
 		const name = invocation.name;
-		if (name.includes("$")) return true;
-		if (name === "." || name === "eval" || name === "source" || name === "trap" || name === "unset") return true;
-		return false;
+		if (name.includes("$") || name === "." || name === "eval" || name === "source" || name === "trap") return "persistent";
+		return name === "unset" ? "direct" : "none";
 	}
+	let effect: FunctionMutationEffect = "none";
 	for (const child of Object.values(record)) {
-		if (commandMayMutateFunctions(child, activeFunctions, checkingFunctions)) return true;
+		effect = strongerMutation(effect, functionMutationEffect(child, activeFunctions, checkingFunctions));
 	}
-	return false;
+	return effect;
 }
 
 function staticShellBuiltinDispatch(command: Command): { name: string; args: string[] } | undefined {
@@ -307,19 +358,24 @@ function removeUnsetFunctions(words: readonly string[], activeFunctions: Map<str
 
 function markDefinitelyShadowedCommands(
 	script: ParsedScript,
+	source: string,
 	shadowedCommands: WeakSet<Command>,
-	argumentForwardingCommands: WeakSet<Command>,
+	argumentForwardingCommands: WeakMap<Command, string[]>,
+	opaqueArgumentCommands: WeakMap<Command, string>,
 ): void {
 	const activeFunctions = new Map<string, BashFunction>();
+	let functionResolutionUncertain = false;
 	for (const statement of script.commands) {
 		const node = statement.command;
 		if (node.type === "Function") {
 			const name = node.name.value;
-			if (name && !name.includes("/")) activeFunctions.set(name, node);
+			if (!functionResolutionUncertain && name && !name.includes("/")) activeFunctions.set(name, node);
 			continue;
 		}
 		if (node.type !== "Command") {
-			if (commandMayMutateFunctions(node, activeFunctions)) activeFunctions.clear();
+			const effect = functionMutationEffect(node, activeFunctions);
+			if (effect !== "none") activeFunctions.clear();
+			if (effect === "persistent") functionResolutionUncertain = true;
 			continue;
 		}
 		if (!node.name) continue;
@@ -327,14 +383,26 @@ function markDefinitelyShadowedCommands(
 		const activeFunction = activeFunctions.get(name);
 		if (activeFunction && !name.includes("/")) {
 			shadowedCommands.add(node);
-			if (functionExecutesArguments(activeFunction.body, activeFunctions)) argumentForwardingCommands.add(node);
-			if (commandMayMutateFunctions(activeFunction.body, activeFunctions)) activeFunctions.clear();
+			if (functionExecutesArguments(activeFunction.body, activeFunctions)) {
+				const forwardingPrefix = exactArgumentForwardingPrefix(activeFunction.body);
+				if (forwardingPrefix) argumentForwardingCommands.set(node, forwardingPrefix);
+				else {
+					opaqueArgumentCommands.set(
+						node,
+						`${source.slice(activeFunction.pos, activeFunction.end)} ${node.suffix.map((word) => word.text).join(" ")}`,
+					);
+				}
+			}
+			const effect = functionMutationEffect(activeFunction.body, activeFunctions);
+			if (effect !== "none") activeFunctions.clear();
+			if (effect === "persistent") functionResolutionUncertain = true;
 			continue;
 		}
 		const invocation = staticShellBuiltinDispatch(node);
 		if (invocation?.name === "unset") removeUnsetFunctions(invocation.args, activeFunctions);
 		else if (invocation && [".", "eval", "source", "trap"].includes(invocation.name)) {
 			activeFunctions.clear();
+			functionResolutionUncertain = true;
 		}
 	}
 }
@@ -350,7 +418,8 @@ function recoverAstCommands(command: string): RecoveredCommands {
 	let hasDynamic = false;
 	const seen = new WeakSet<object>();
 	const shadowedCommands = new WeakSet<Command>();
-	const argumentForwardingCommands = new WeakSet<Command>();
+	const argumentForwardingCommands = new WeakMap<Command, string[]>();
+	const opaqueArgumentCommands = new WeakMap<Command, string>();
 
 	const visit = (value: unknown): void => {
 		if (!value || typeof value !== "object" || seen.has(value)) return;
@@ -362,7 +431,8 @@ function recoverAstCommands(command: string): RecoveredCommands {
 			const segment = commandSegment(
 				shellCommand,
 				shadowedCommands.has(shellCommand),
-				argumentForwardingCommands.has(shellCommand),
+				argumentForwardingCommands.get(shellCommand),
+				opaqueArgumentCommands.get(shellCommand),
 			);
 			if (segment) {
 				segments.push(segment);
@@ -373,7 +443,13 @@ function recoverAstCommands(command: string): RecoveredCommands {
 
 		if (record.type === "Script") {
 			const script = value as ParsedScript;
-			markDefinitelyShadowedCommands(script, shadowedCommands, argumentForwardingCommands);
+			markDefinitelyShadowedCommands(
+				script,
+				script.source ?? command,
+				shadowedCommands,
+				argumentForwardingCommands,
+				opaqueArgumentCommands,
+			);
 			for (const error of script.errors ?? []) {
 				errors.push(`${error.message} at offset ${error.pos}`);
 			}

@@ -69,6 +69,7 @@ test("Bash AST recovery distinguishes executable commands from complex-script da
 	assert.equal(evaluateCommand("kubectl(){ printf '%s\\n' safe; }; command source ./functions.sh; kubectl delete pod api", RELAXED).allow, false);
 	assert.equal(evaluateCommand("kubectl(){ printf '%s\\n' safe; }; trap 'unset -f kubectl' DEBUG; kubectl delete pod api", RELAXED).allow, false);
 	assert.equal(evaluateCommand("kubectl(){ printf '%s\\n' safe; }; builtin trap 'unset -f kubectl' DEBUG; kubectl delete pod api", RELAXED).allow, false);
+	assert.equal(evaluateCommand("trap 'unset -f kubectl' DEBUG; kubectl(){ printf safe; }; kubectl delete pod api", RELAXED).allow, false);
 	assert.equal(evaluateCommand("kubectl(){ unset -f kubectl; }; kubectl; kubectl delete pod api", RELAXED).allow, false);
 	assert.equal(evaluateCommand("drop(){ builtin unset -f kubectl; }; kubectl(){ printf safe; }; drop; kubectl delete pod api", RELAXED).allow, false);
 	assert.equal(evaluateCommand("sudo(){ printf '%s\\n' safe; }; sudo kubectl delete pod api", RELAXED).allow, true);
@@ -78,6 +79,9 @@ test("Bash AST recovery distinguishes executable commands from complex-script da
 	assert.equal(evaluateCommand("deploy(){ \"$@\"; }; deploy kubectl delete pod api", RELAXED).allow, false);
 	assert.equal(evaluateCommand("sudo(){ \"$@\"; }; sudo kubectl get pods", RELAXED).allow, true);
 	assert.equal(evaluateCommand("sudo(){ printf '%s\\n' \"$@\"; }; sudo kubectl delete pod api", RELAXED).allow, true);
+	assert.equal(evaluateCommand("k(){ kubectl \"$@\"; }; k delete pod api", RELAXED).allow, false);
+	assert.equal(evaluateCommand("k(){ kubectl \"$@\"; }; k get pods", RELAXED).allow, true);
+	assert.equal(evaluateCommand("run(){ shift; \"$@\"; }; run x kubectl delete pod api", RELAXED).allow, false);
 });
 
 test("AST-recovered invocations preserve wrappers, paths, and non-bypassable rules", () => {

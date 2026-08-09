@@ -220,6 +220,13 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 		: enabledExecutables.filter((executable) => INDIRECT_TEXT_GUARDS.has(executable));
 
 	for (const segment of segments) {
+		if (segment.opaqueArgumentText) {
+			if (containsGuardedText(segment.opaqueArgumentText, enabledExecutables)) {
+				return knownRisk("A shell function can execute guarded call arguments, which requires manual approval");
+			}
+			uncertainty ??= unclassified("A shell function can execute transformed call arguments, which requires manual approval");
+			continue;
+		}
 		if (segment.shadowedExecutable && segment.forwardedWords === undefined) {
 			uncertainty ??= unclassified(
 				`This command resolves ${segment.shadowedExecutable} to a shell function, which requires manual approval`,
