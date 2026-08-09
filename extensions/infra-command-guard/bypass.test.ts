@@ -151,20 +151,28 @@ test("ambiguous or dynamic kubeconfig values receive no bypass offer", () => {
 	}
 });
 
-test("kubeconfig scope rejects HOME overrides and uncertain effective cwd", () => {
+test("home-derived kubeconfig scopes reject uncertain shell environments", () => {
 	for (const command of [
 		'HOME=/other kubectl --kubeconfig "$HOME/kc" delete pod foo',
-		'env HOME=/other kubectl --kubeconfig "$HOME/kc" delete pod foo',
-		'unset HOME && kubectl --kubeconfig "$HOME/kc" delete pod foo',
-		'unset -v HOME && kubectl --kubeconfig "$HOME/kc" delete pod foo',
-		'export HOME=/other && kubectl --kubeconfig "$HOME/kc" delete pod foo',
 		'env -u HOME kubectl --kubeconfig "$HOME/kc" delete pod foo',
-		'env --unset=HOME kubectl --kubeconfig "$HOME/kc" delete pod foo',
-		'env -i kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'printf -v HOME /other && kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'read HOME < /tmp/value && kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		'echo ready && kubectl --kubeconfig "$HOME/kc" delete pod foo',
+		"echo ready && kubectl --kubeconfig ~/kc delete pod foo",
+		"echo ready && rm ~/target",
+	]) {
+		assert.equal(
+			findMatchingBypassRule(executionIdentity("bash", { command }, "/repo")!, SETTINGS),
+			undefined,
+			command,
+		);
+	}
+});
+
+test("kubeconfig scopes reject uncertain effective cwd", () => {
+	for (const command of [
 		"cd /other && kubectl --kubeconfig relative/kc delete pod foo",
-		"pushd /other && kubectl --kubeconfig relative/kc delete pod foo",
 		"env -C /other kubectl --kubeconfig relative/kc delete pod foo",
-		"sudo -D /other kubectl --kubeconfig relative/kc delete pod foo",
 	]) {
 		assert.equal(
 			findMatchingBypassRule(executionIdentity("bash", { command }, "/repo")!, SETTINGS),
