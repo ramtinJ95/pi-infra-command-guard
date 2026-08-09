@@ -4,7 +4,7 @@ import { GUARDED_EXECUTABLES } from "./guarded-executables.ts";
 const GUARDED_PATTERNS = new Map<string, RegExp>();
 const DEFAULT_GUARDED_PATTERN = new RegExp(`\\b(?:${GUARDED_EXECUTABLES.join("|")})\\b`, "i");
 
-type ShellSegment = { words: string[]; rawWords: string[]; bare: string };
+type ShellSegment = { words: string[]; rawWords: string[]; bare: string; shadowedExecutable?: string };
 type ParsedCommands =
 	| { segments: ShellSegment[]; error?: undefined }
 	| { segments?: undefined; error: string };
@@ -156,9 +156,13 @@ function containsGuardedText(
 function hasDynamicExecutable(command: string): boolean {
 	if (!String(command || "").includes("$")) return false;
 	const parsed = parseSimpleCommands(command);
-	const segments = requiresAstRecovery(parsed)
-		? recoverAstCommands(command).segments
-		: ("error" in parsed ? [] : parsed.segments);
+	const recovered = requiresAstRecovery(parsed) ? recoverAstCommands(command) : undefined;
+	if (recovered?.hasDynamicExecutable) return true;
+	const segments = recovered?.segments ?? ("error" in parsed ? [] : parsed.segments);
+	return segmentsHaveDynamicExecutable(segments);
+}
+
+function segmentsHaveDynamicExecutable(segments: readonly ShellSegment[]): boolean {
 	for (const segment of segments) {
 		const invocation = extractInvocation(segment.words);
 		if (!("error" in invocation) && invocation.executable?.includes("$")) return true;
@@ -182,15 +186,37 @@ function unquotedWordText(word: Word): string {
 		.join("");
 }
 
-function commandSegment(command: Command): ShellSegment | undefined {
+function commandSegment(command: Command, shadowed: boolean): ShellSegment | undefined {
 	if (!command.name) return undefined;
 	const prefixWords = command.prefix.map((assignment) => assignment.text);
 	const commandWords = [command.name, ...command.suffix];
+	const directExecutable = command.name.value;
 	return {
 		words: [...prefixWords, ...commandWords.map((word) => word.value)],
 		rawWords: [...prefixWords, ...commandWords.map((word) => word.text)],
 		bare: [...prefixWords, ...commandWords.map(unquotedWordText)].join(" "),
+		shadowedExecutable: shadowed && !directExecutable.includes("/") ? stripPath(directExecutable) : undefined,
 	};
+}
+
+function markDefinitelyShadowedCommands(script: ParsedScript, shadowedCommands: WeakSet<Command>): void {
+	const activeFunctions = new Set<string>();
+	for (const statement of script.commands) {
+		const node = statement.command;
+		if (node.type === "Function") {
+			const name = node.name.value;
+			if (name && !name.includes("/")) activeFunctions.add(stripPath(name));
+			continue;
+		}
+		if (node.type !== "Command") {
+			activeFunctions.clear();
+			continue;
+		}
+		if (!node.name) continue;
+		const name = node.name.value;
+		if (name && !name.includes("/") && activeFunctions.has(stripPath(name))) shadowedCommands.add(node);
+		activeFunctions.clear();
+	}
 }
 
 /**
@@ -203,6 +229,7 @@ function recoverAstCommands(command: string): RecoveredCommands {
 	const errors: string[] = [];
 	let hasDynamic = false;
 	const seen = new WeakSet<object>();
+	const shadowedCommands = new WeakSet<Command>();
 
 	const visit = (value: unknown): void => {
 		if (!value || typeof value !== "object" || seen.has(value)) return;
@@ -211,7 +238,7 @@ function recoverAstCommands(command: string): RecoveredCommands {
 
 		if (record.type === "Command") {
 			const shellCommand = value as Command;
-			const segment = commandSegment(shellCommand);
+			const segment = commandSegment(shellCommand, shadowedCommands.has(shellCommand));
 			if (segment) {
 				segments.push(segment);
 				const invocation = extractInvocation(segment.words);
@@ -220,7 +247,9 @@ function recoverAstCommands(command: string): RecoveredCommands {
 		}
 
 		if (record.type === "Script") {
-			for (const error of (value as ParsedScript).errors ?? []) {
+			const script = value as ParsedScript;
+			markDefinitelyShadowedCommands(script, shadowedCommands);
+			for (const error of script.errors ?? []) {
 				errors.push(`${error.message} at offset ${error.pos}`);
 			}
 		}
@@ -688,6 +717,7 @@ export {
 	normalizeForInfraScan,
 	containsGuardedText,
 	hasDynamicExecutable,
+	segmentsHaveDynamicExecutable,
 	requiresAstRecovery,
 	recoverAstCommands,
 	parseSimpleCommands,

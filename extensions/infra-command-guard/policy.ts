@@ -4,10 +4,10 @@ import {
 	SHELL_RUNNERS,
 	containsGuardedText,
 	extractInvocation,
-	hasDynamicExecutable,
 	parseSimpleCommands,
 	recoverAstCommands,
 	requiresAstRecovery,
+	segmentsHaveDynamicExecutable,
 	type Invocation,
 } from "./shell.ts";
 import {
@@ -185,13 +185,10 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 		: enabledGuardedExecutables(guardSettings);
 	if (enabledExecutables.length === 0) return allow();
 
-	let uncertainty = hasDynamicExecutable(command)
-		? unclassified("This command resolves its executable through a shell variable, which requires manual approval")
-		: undefined;
 	const mentionsEnabledExecutable = containsGuardedText(command, enabledExecutables);
 	const mayDelegateThroughDisabledFind = !guardSettings.find && /-(?:exec|execdir|ok|okdir)\b/.test(command) &&
 		containsGuardedText(command, ["find"]);
-	if (!mentionsEnabledExecutable && !mayDelegateThroughDisabledFind && !uncertainty) return allow();
+	if (!mentionsEnabledExecutable && !mayDelegateThroughDisabledFind && !command.includes("$")) return allow();
 	const kubectlOverrides = commandOverrides.kubectl;
 	if (
 		guardSettings.kubectl &&
@@ -202,6 +199,11 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 
 	const parsed = parseSimpleCommands(command);
 	const recovered = requiresAstRecovery(parsed) ? recoverAstCommands(command) : undefined;
+	const segments = recovered?.segments ?? ("error" in parsed ? [] : parsed.segments);
+	let uncertainty = recovered?.hasDynamicExecutable || segmentsHaveDynamicExecutable(segments)
+		? unclassified("This command resolves its executable through a shell variable, which requires manual approval")
+		: undefined;
+	if (!mentionsEnabledExecutable && !mayDelegateThroughDisabledFind && !uncertainty) return allow();
 	if (recovered) {
 		const astDiagnostic = recovered.errors[0] ? `; Bash AST diagnostic: ${recovered.errors[0]}` : "";
 		uncertainty ??= unclassified(
@@ -213,7 +215,6 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 			uncertainty = unclassified("This command resolves its executable through a shell expansion, which requires manual approval");
 		}
 	}
-	const segments = recovered?.segments ?? ("error" in parsed ? [] : parsed.segments);
 	const enabledIndirectTextGuards = enabledExecutables === GUARDED_EXECUTABLES
 		? DEFAULT_ENABLED_INDIRECT_TEXT_GUARDS
 		: enabledExecutables.filter((executable) => INDIRECT_TEXT_GUARDS.has(executable));
@@ -239,6 +240,13 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 
 		if (SHELL_EXECUTION_BUILTINS.has(invocation.executable)) {
 			uncertainty ??= unclassified(`This command uses shell execution syntax (${invocation.executable}), which requires manual approval`);
+			continue;
+		}
+
+		if (segment.shadowedExecutable === invocation.executable && invocation.wrappers.length === 0) {
+			uncertainty ??= unclassified(
+				`This command resolves ${invocation.executable} to a shell function, which requires manual approval`,
+			);
 			continue;
 		}
 
