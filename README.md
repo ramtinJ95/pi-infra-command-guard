@@ -177,17 +177,17 @@ Two session-scoped escape hatches exist for focused work. Both live in memory on
 
 ### Pausing the guard
 
-Run `/infra-guard` and choose `Pause guard…`, then pick 10 minutes, 30 minutes, or 1 hour. While paused, every guarded command runs without approval except interactive TTY shell/interpreter sessions, which stay blocked because their later input cannot be classified. The same menu shows the remaining time, resumes the guard early, and clears everything. Active pauses and bypasses are also shown in the Pi status line.
+Run `/infra-guard` and choose `Pause guard…`, then pick 10 minutes, 30 minutes, or 1 hour. While paused, every guarded command runs without approval except interactive TTY shell/interpreter sessions, which stay blocked because their later input cannot be classified. The same menu resumes the guard early, removes individual scoped bypasses, and clears multiple active exceptions together. Active pauses and bypasses are also shown in the Pi status line.
 
 ### Scoped bypasses from the approval overlay
 
 When a blocked command contains a single guarded invocation whose prefix identifies a target — for example `kubectl --kubeconfig ~/.config/staging/kubeconfig delete pod foo` — the approval overlay gains a third choice, `Approve & bypass … for…`. Picking a duration (10 minutes, 30 minutes, or 1 hour) approves the command and records a bypass rule for that session:
 
 - the rule is the invocation's normalized token prefix, including path-valued options such as `--kubeconfig` (with `~` expanded), so the target environment is part of the rule
-- trailing arguments are covered: bypassing the prefix above also covers `kubectl --kubeconfig ~/.config/staging/kubeconfig delete pod bar`
+- trailing arguments are covered, but existing tokens cannot change: bypassing the prefix above also covers `kubectl --kubeconfig ~/.config/staging/kubeconfig delete pod foo --grace-period=0`, not a different pod name
 - the rule only applies while the command runs in the blocked command's working directory or a subdirectory
 - commands the static policy already allows are never offered, and non-bypassable risks (`kubectl --raw`, `gcloud --flags-file`, Helm `--post-renderer`, invocation-local Git aliases) can never be bypassed
-- unparseable commands produce no bypass offer
+- unparseable commands and compound commands with more than one guarded or unclassified operation produce no bypass offer
 
 Bypass rules apply uniformly to the `bash` tool, direct `exec_command` calls, and Code Mode nested calls.
 

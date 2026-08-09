@@ -130,19 +130,22 @@ export default function createExtension(pi: ExtensionAPI) {
 			}
 			const bypassStore = currentBypasses();
 			const paused = bypassStore.isPaused();
-			const active = bypassStore.describe().filter((line) => !paused || !line.startsWith("Guard paused"));
+			const activeRules = bypassStore.listRules();
+			const removeOptions = activeRules.map((rule) => `Remove bypass: ${bypassStore.describeRule(rule)}`);
 			const pauseOption = paused ? "Resume guard now" : "Pause guard…";
 			const clearOption = "Clear all pauses and bypasses";
+			const activeCount = (paused ? 1 : 0) + activeRules.length;
 			const options = [
-				...(active.length > 0 ? active.map((line) => `Bypass: ${line}`) : ["No active scoped bypasses"]),
 				pauseOption,
-				...(paused || active.length > 0 ? [clearOption] : []),
+				...removeOptions,
+				...(activeCount > 1 ? [clearOption] : []),
 			];
 			const choice = await ctx.ui.select("infra-command-guard", options);
 			if (!choice) return;
 			if (choice === pauseOption) {
 				if (paused) {
 					bypassStore.resume();
+					currentApprovals().clear();
 					syncBypassStatus(ctx);
 					ctx.ui.notify("infra-command-guard resumed.", "info");
 					return;
@@ -154,12 +157,23 @@ export default function createExtension(pi: ExtensionAPI) {
 				const option = DURATION_OPTIONS.find((candidate) => candidate.label === duration);
 				if (!option) return;
 				bypassStore.pause(option.value);
+				currentApprovals().clear();
 				syncBypassStatus(ctx);
 				ctx.ui.notify(`infra-command-guard paused for ${option.label}.`, "warning");
 				return;
 			}
+			const removeIndex = removeOptions.indexOf(choice);
+			if (removeIndex !== -1) {
+				const rule = activeRules[removeIndex];
+				if (!rule || !bypassStore.removeRule(rule)) return;
+				currentApprovals().clear();
+				syncBypassStatus(ctx);
+				ctx.ui.notify(`Removed bypass: ${rule.executable} ${rule.prefix.join(" ")} in ${rule.cwd}`, "info");
+				return;
+			}
 			if (choice === clearOption) {
 				bypassStore.clear();
+				currentApprovals().clear();
 				syncBypassStatus(ctx);
 				ctx.ui.notify("All infra-command-guard pauses and bypasses cleared.", "info");
 			}

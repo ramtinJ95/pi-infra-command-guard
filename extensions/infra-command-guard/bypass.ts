@@ -88,6 +88,18 @@ class GuardBypassStore {
 	}
 
 	addRule(executable: GuardedExecutable, cwd: string, prefix: readonly string[], durationMs: number): BypassRule {
+		this.prune();
+		const existing = this.rules.find(
+			(rule) =>
+				rule.executable === executable &&
+				rule.cwd === cwd &&
+				rule.prefix.length === prefix.length &&
+				rule.prefix.every((token, index) => token === prefix[index]),
+		);
+		if (existing) {
+			existing.expiresAt = this.now() + durationMs;
+			return existing;
+		}
 		const rule = { executable, cwd, prefix: [...prefix], expiresAt: this.now() + durationMs };
 		this.rules.push(rule);
 		return rule;
@@ -98,6 +110,11 @@ class GuardBypassStore {
 		if (index === -1) return false;
 		this.rules.splice(index, 1);
 		return true;
+	}
+
+	listRules(): readonly BypassRule[] {
+		this.prune();
+		return [...this.rules];
 	}
 
 	clear(): void {
@@ -123,11 +140,13 @@ class GuardBypassStore {
 			lines.push(`Guard paused for ${formatDuration(this.pauseExpiresAt - this.now())}`);
 		}
 		for (const rule of this.rules) {
-			lines.push(
-				`${rule.executable} ${rule.prefix.join(" ")} in ${rule.cwd} — bypassed for ${formatDuration(rule.expiresAt - this.now())}`,
-			);
+			lines.push(this.describeRule(rule));
 		}
 		return lines;
+	}
+
+	describeRule(rule: BypassRule): string {
+		return `${rule.executable} ${rule.prefix.join(" ")} in ${rule.cwd} — bypassed for ${formatDuration(rule.expiresAt - this.now())}`;
 	}
 
 	private prune(): void {

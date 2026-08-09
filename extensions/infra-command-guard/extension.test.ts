@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { APPROVAL_STORE_KEY, BYPASS_STORE_KEY } from "./approvals.ts";
+import {
+	APPROVAL_STORE_KEY,
+	BYPASS_STORE_KEY,
+	ApprovalStore,
+	executionIdentity,
+} from "./approvals.ts";
+import type { GuardBypassStore } from "./bypass.ts";
 import {
 	type CodeModeToolCall,
 	type CodeModeToolPreflight,
@@ -59,16 +65,19 @@ type EventFacade = ReturnType<ReturnType<typeof createTestEventBus>["facade"]>;
 function createHarness(events: EventFacade) {
 	const handlers = new Map<string, Array<(event: any, context: any) => unknown>>();
 	const tools: any[] = [];
+	const commands = new Map<string, { handler(args: string, context: any): unknown }>();
 	const pi = {
 		events,
-		registerCommand() {},
+		registerCommand(name: string, command: { handler(args: string, context: any): unknown }) {
+			commands.set(name, command);
+		},
 		registerTool(tool: any) { tools.push(tool); },
 		on(name: string, handler: (event: any, context: any) => unknown) {
 			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
 		},
 	};
 	createExtension(pi as never);
-	return { handlers, pi, tools };
+	return { commands, handlers, pi, tools };
 }
 
 function createPreflightBroker(events: EventFacade) {
@@ -133,6 +142,165 @@ test("outer Code Mode calls fail closed when nested preflights are unavailable",
 	}
 });
 
+test("infra-guard menu pauses, resumes, and removes individual bypasses without inert rows", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-menu-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = directory;
+	try {
+		const events = createTestEventBus().facade();
+		const { commands, handlers, pi } = createHarness(events);
+		const command = commands.get("infra-guard")!;
+		const toolCall = handlers.get("tool_call")![0]!;
+		const bypasses = (pi.events as unknown as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as GuardBypassStore;
+		const approvals = (pi.events as unknown as Record<PropertyKey, unknown>)[APPROVAL_STORE_KEY] as ApprovalStore;
+		const notifications: string[] = [];
+		const statuses: Array<string | undefined> = [];
+		const runMenu = async (
+			selections: string[],
+			inspect?: (title: string, options: string[]) => void,
+		) => {
+			let index = 0;
+			await command.handler("", {
+				hasUI: true,
+				mode: "tui",
+				ui: {
+					async select(title: string, options: string[]) {
+						inspect?.(title, options);
+						return selections[index++];
+					},
+					notify(message: string) { notifications.push(message); },
+					setStatus(_name: string, value: string | undefined) { statuses.push(value); },
+				},
+			});
+		};
+
+		const stalePending = approvals.createPending(
+			executionIdentity("exec-command", { cmd: "rm stale-menu-request" }, "/tmp")!,
+			"rm command needs confirmation",
+		);
+		await runMenu(["Pause guard…", "10 minutes"], (_title, options) => {
+			if (options.includes("Pause guard…")) assert.deepEqual(options, ["Pause guard…"]);
+		});
+		assert.equal(bypasses.isPaused(), true);
+		assert.equal(
+			approvals.validate(stalePending.id, "rm stale-menu-request", "rm command needs confirmation").ok,
+			false,
+		);
+		assert.equal(
+			await toolCall({ toolName: "exec_command", input: { cmd: "rm paused-menu-target" } }, { cwd: "/tmp", mode: "tui" }),
+			undefined,
+		);
+
+		await runMenu(["Resume guard now"]);
+		assert.equal(bypasses.isPaused(), false);
+		const blocked = await toolCall(
+			{ toolName: "exec_command", input: { cmd: "rm resumed-menu-target" } },
+			{ cwd: "/tmp", mode: "tui" },
+		) as { block: boolean };
+		assert.equal(blocked.block, true);
+
+		bypasses.addRule("kubectl", "/repo", ["delete", "pod", "api"], 10 * 60 * 1000);
+		const removeOption = `Remove bypass: ${bypasses.describeRule(bypasses.listRules()[0]!)}`;
+		await runMenu([removeOption], (_title, options) => {
+			assert.deepEqual(options, ["Pause guard…", removeOption]);
+		});
+		assert.deepEqual(bypasses.listRules(), []);
+		assert.match(notifications.at(-1) ?? "", /Removed bypass/);
+		assert.ok(statuses.length > 0);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test("approval-overlay bypass keeps the blocked command cwd and does not leave a one-time grant", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-bypass-flow-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = directory;
+	try {
+		const events = createTestEventBus().facade();
+		const { handlers, pi, tools } = createHarness(events);
+		const toolCall = handlers.get("tool_call")![0]!;
+		const command = "kubectl delete pod api";
+		const blocked = await toolCall(
+			{ toolName: "exec_command", input: { cmd: command, workdir: "nested" } },
+			{ cwd: "/repo", mode: "tui" },
+		) as { block: boolean; reason: string };
+		assert.equal(blocked.block, true);
+		const requestId = blocked.reason.match(/Approval request: ([^\n]+)/)?.[1];
+		const reason = blocked.reason.match(/^BLOCKED — ([^\n]+)/)?.[1];
+		assert.ok(requestId);
+		assert.ok(reason);
+
+		const approve = tools.find((tool) => tool.name === "approve_infra_command")!;
+		const result = await approve.execute(
+			"approve-bypass",
+			{
+				request_id: requestId,
+				command,
+				reason,
+				summary: "Delete one test pod.",
+				flags: [],
+				blastRadius: "The named pod is removed.",
+			},
+			new AbortController().signal,
+			undefined,
+			{
+				cwd: "/different-approval-tool-cwd",
+				mode: "tui",
+				ui: {
+					async custom(factory: (...args: any[]) => { handleInput(data: string): void }) {
+						let choice = "cancel";
+						const overlay = factory(
+							{ requestRender() {} },
+							{},
+							{ matches: () => false },
+							(selected: string) => { choice = selected; },
+						);
+						overlay.handleInput("b");
+						return choice;
+					},
+					async select() { return "10 minutes"; },
+					notify() {},
+					setStatus() {},
+				},
+			},
+		);
+		assert.equal(result.details.approved, true);
+		assert.equal(result.details.bypass, true);
+		assert.match(result.content[0].text, /Bypass active/);
+
+		const bypasses = (pi.events as unknown as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as GuardBypassStore;
+		const approvals = (pi.events as unknown as Record<PropertyKey, unknown>)[APPROVAL_STORE_KEY] as ApprovalStore;
+		const [rule] = bypasses.listRules();
+		assert.ok(rule);
+		assert.equal(rule.cwd, "/repo/nested");
+		assert.deepEqual(rule.prefix, ["delete", "pod", "api"]);
+		assert.equal(
+			approvals.consume(executionIdentity("exec-command", { cmd: command, workdir: "nested" }, "/repo")!),
+			false,
+			"a scoped bypass must not leave an unused one-time approval",
+		);
+		assert.equal(
+			await toolCall(
+				{ toolName: "exec_command", input: { cmd: command, workdir: "nested" } },
+				{ cwd: "/repo", mode: "tui" },
+			),
+			undefined,
+		);
+		const outside = await toolCall(
+			{ toolName: "exec_command", input: { cmd: command } },
+			{ cwd: "/different-approval-tool-cwd", mode: "tui" },
+		) as { block: boolean };
+		assert.equal(outside.block, true);
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
 test("extension allows outer Code Mode calls only after its nested preflight connects", async () => {
 	const bus = createTestEventBus();
 	const broker = createPreflightBroker(bus.facade());
@@ -159,6 +327,28 @@ test("extension allows outer Code Mode calls only after its nested preflight con
 		}),
 		undefined,
 	);
+	broker.shutdown();
+});
+
+test("Code Mode scoped bypass permits only its single matching nested invocation", async () => {
+	const bus = createTestEventBus();
+	const broker = createPreflightBroker(bus.facade());
+	const { pi } = createHarness(bus.facade());
+	const preflight = await waitForPreflight(broker);
+	const bypasses = (pi.events as unknown as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as GuardBypassStore;
+	bypasses.addRule("kubectl", "/repo", ["delete", "pod", "api"], 10 * 60 * 1000);
+	const call = {
+		...nestedCall("kubectl delete pod api"),
+		cwd: "/repo",
+		extensionContext: { cwd: "/repo", mode: "tui" } as never,
+	};
+	assert.equal(await preflight(call), undefined);
+	const compound = await preflight({
+		...call,
+		input: { cmd: "kubectl delete pod api && rm other-target" },
+	});
+	assert.equal(compound?.block, true);
+	assert.match(compound?.reason ?? "", /Approval request:/);
 	broker.shutdown();
 });
 
