@@ -1,49 +1,51 @@
 import { performance } from "node:perf_hooks";
-import { DEFAULT_COMMAND_POLICY_SETTINGS, type CommandPolicySettings } from "./guarded-executables.ts";
+import { DEFAULT_COMMAND_POLICY_SETTINGS } from "./guarded-executables.ts";
 import { evaluateCommand } from "./policy.ts";
 
-const ITERATIONS = 200_000;
-const ROUNDS = 9;
-const RELAXED_POLICY_SETTINGS = { ...DEFAULT_COMMAND_POLICY_SETTINGS, guardUnclassifiedCommands: false };
-const RELAXED_UNCERTAINTY = ['rg -n "kubectl|vault" README.md', "$TOOL apply", "aws madeup inspect-resource"];
+const WARMUP_ITERATIONS = 20_000;
+const ITERATIONS = 50_000;
+const ROUNDS = 11;
+const RELAXED = { ...DEFAULT_COMMAND_POLICY_SETTINGS, guardUnclassifiedCommands: false };
 
-const workloads = {
-	"unguarded fast path": ["npm test", "rg TODO src", "node --version"],
-	"existing guarded reads": ["kubectl get pods", "terraform plan", "helm list", "argocd app get api"],
-	"existing guarded writes": ["kubectl delete pod api", "terraform apply", "helm upgrade api ./chart", "rm -rf target"],
-	"cloud CLI reads": ["aws ec2 describe-instances", "az vm list", "gcloud compute instances list"],
-	"cloud CLI writes": ["aws ec2 terminate-instances", "az vm delete", "gcloud compute instances delete web"],
-	"Docker allowed commands": ["docker ps", "docker compose up -d", "docker run nginx:latest"],
-	"Docker approval commands": ["docker volume rm database", "docker exec api sh", "docker run --privileged nginx:latest"],
-	"Git allowed commands": ["git status --short", "git restore --staged file.txt", "git push origin main"],
-	"Git approval commands": ["git clean -fdx", "git reset --hard HEAD~1", "git push --force origin main"],
-	"Vault allowed commands": ["vault status", "vault version", "vault help read"],
-	"Vault approval commands": ["vault read secret/production", "vault write secret/production value=x", "vault operator seal"],
+const WORKLOADS: Record<string, string[]> = {
+	"simple/safe": ["npm test", "kubectl get pods -A", "git status --short", "terraform plan"],
+	"simple/risky": ["kubectl apply -f app.yaml", "kubectl delete pod api", "terraform apply", "rm -rf target"],
+	"complex/safe": [
+		'tmp=$(mktemp); printf "%s\\n" "$tmp"; kubectl get pods | rg api',
+		'inspect(){ kubectl get pods; }; for n in a b; do printf "%s\\n" "$n"; done',
+		"cat <<'EOF'\nkubectl delete pod documentation-only\nEOF",
+		'printf "%s\\n" "kubectl apply -f docs.yaml"; rg "kubectl delete" README.md',
+	],
+	"complex/risky": [
+		'tmp=$(mktemp); trap \'rm -f "$tmp"\' EXIT; kubectl apply --server-side -f app.yaml',
+		'deploy(){ current=$(kubectl get pod api -o name); for n in api; do kubectl patch pod "$n" -p \'{}\'; done; }; deploy',
+		"cleanup(){ kubectl delete pod old; }; cat <<'EOF' | kubectl apply -f -\nkind: Pod\nmetadata:\n  name: api\nEOF\ncleanup",
+		"(kubectl get pods | rg api) && kubectl delete pod api",
+	],
 };
 
-function median(values: number[]): number {
-	const sorted = [...values].sort((left, right) => left - right);
-	return sorted[Math.floor(sorted.length / 2)];
+function percentile(sorted: number[], quantile: number): number {
+	return sorted[Math.ceil(sorted.length * quantile) - 1];
 }
 
-function run(commands: string[], settings?: CommandPolicySettings): number {
+function run(commands: string[], iterations: number): number {
 	let allowed = 0;
 	const started = performance.now();
-	for (let index = 0; index < ITERATIONS; index += 1) {
-		if (evaluateCommand(commands[index % commands.length], settings).allow) allowed += 1;
+	for (let index = 0; index < iterations; index += 1) {
+		if (evaluateCommand(commands[index % commands.length], RELAXED).allow) allowed += 1;
 	}
-	const elapsedMs = performance.now() - started;
 	if (allowed < 0) throw new Error("unreachable");
-	return (elapsedMs * 1_000_000) / ITERATIONS;
+	return ((performance.now() - started) * 1_000_000) / iterations;
 }
 
-for (const commands of Object.values(workloads)) run(commands);
-run(RELAXED_UNCERTAINTY, RELAXED_POLICY_SETTINGS);
+for (const commands of Object.values(WORKLOADS)) run(commands, WARMUP_ITERATIONS);
 
-for (const [name, commands] of Object.entries(workloads)) {
-	const samples = Array.from({ length: ROUNDS }, () => run(commands));
-	console.log(`${name}: ${median(samples).toFixed(1)} ns/evaluation`);
+console.log(`warmup=${WARMUP_ITERATIONS}/category iterations=${ITERATIONS}/round rounds=${ROUNDS}`);
+for (const [name, commands] of Object.entries(WORKLOADS)) {
+	const samples = Array.from({ length: ROUNDS }, () => run(commands, ITERATIONS)).sort((left, right) => left - right);
+	const median = percentile(samples, 0.5);
+	const p95 = percentile(samples, 0.95);
+	console.log(
+		`${name}: median=${median.toFixed(1)} ns p95=${p95.toFixed(1)} ns throughput=${(1_000_000_000 / median).toFixed(0)}/s`,
+	);
 }
-
-const relaxedSamples = Array.from({ length: ROUNDS }, () => run(RELAXED_UNCERTAINTY, RELAXED_POLICY_SETTINGS));
-console.log(`relaxed uncertainty: ${median(relaxedSamples).toFixed(1)} ns/evaluation`);

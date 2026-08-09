@@ -1,12 +1,26 @@
+import { parse, type Command, type Function as BashFunction, type ParsedScript, type Word } from "unbash";
 import { GUARDED_EXECUTABLES } from "./guarded-executables.ts";
 
 const GUARDED_PATTERNS = new Map<string, RegExp>();
 const DEFAULT_GUARDED_PATTERN = new RegExp(`\\b(?:${GUARDED_EXECUTABLES.join("|")})\\b`, "i");
 
-type ShellSegment = { words: string[]; rawWords: string[]; bare: string };
+type ShellSegment = {
+	words: string[];
+	rawWords: string[];
+	bare: string;
+	shadowedExecutable?: string;
+	forwardedWords?: string[];
+	forwardedBare?: string;
+	opaqueArgumentText?: string;
+};
 type ParsedCommands =
 	| { segments: ShellSegment[]; error?: undefined }
 	| { segments?: undefined; error: string };
+type RecoveredCommands = {
+	segments: ShellSegment[];
+	errors: string[];
+	hasDynamicExecutable: boolean;
+};
 type OptionClassification = "boolean" | "value" | "unknown";
 type ConsumedOptions =
 	| { index: number; error?: undefined }
@@ -150,12 +164,312 @@ function containsGuardedText(
 function hasDynamicExecutable(command: string): boolean {
 	if (!String(command || "").includes("$")) return false;
 	const parsed = parseSimpleCommands(command);
-	if ("error" in parsed) return false;
-	for (const segment of parsed.segments) {
+	const recovered = requiresAstRecovery(parsed) ? recoverAstCommands(command) : undefined;
+	if (recovered?.hasDynamicExecutable) return true;
+	const segments = recovered?.segments ?? ("error" in parsed ? [] : parsed.segments);
+	return segmentsHaveDynamicExecutable(segments);
+}
+
+function segmentsHaveDynamicExecutable(segments: readonly ShellSegment[]): boolean {
+	for (const segment of segments) {
 		const invocation = extractInvocation(segment.words);
 		if (!("error" in invocation) && invocation.executable?.includes("$")) return true;
 	}
 	return false;
+}
+
+function requiresAstRecovery(parsed: ParsedCommands): boolean {
+	if ("error" in parsed) return true;
+	return parsed.segments.some((segment) => {
+		const invocation = extractInvocation(segment.words);
+		return !("error" in invocation) && invocation.executable !== null && SHELL_CONTROL_KEYWORDS.has(invocation.executable);
+	});
+}
+
+function unquotedWordText(word: Word): string {
+	if (!word.parts) return word.value;
+	return word.parts
+		.filter((part) => part.type === "Literal")
+		.map((part) => part.value)
+		.join("");
+}
+
+function commandSegment(
+	command: Command,
+	shadowed: boolean,
+	forwardingPrefix: string[] | undefined,
+	opaqueArgumentText: string | undefined,
+): ShellSegment | undefined {
+	if (!command.name) return undefined;
+	const prefixWords = command.prefix.map((assignment) => assignment.text);
+	const commandWords = [command.name, ...command.suffix];
+	const directExecutable = command.name.value;
+	return {
+		words: [...prefixWords, ...commandWords.map((word) => word.value)],
+		rawWords: [...prefixWords, ...commandWords.map((word) => word.text)],
+		bare: [...prefixWords, ...commandWords.map(unquotedWordText)].join(" "),
+		shadowedExecutable: shadowed && !directExecutable.includes("/") ? stripPath(directExecutable) : undefined,
+		forwardedWords: shadowed && forwardingPrefix
+			? [...forwardingPrefix, ...command.suffix.map((word) => word.value)]
+			: undefined,
+		forwardedBare: shadowed && forwardingPrefix
+			? [...forwardingPrefix, ...command.suffix.map(unquotedWordText)].join(" ")
+			: undefined,
+		opaqueArgumentText: shadowed ? opaqueArgumentText : undefined,
+	};
+}
+
+const POSITIONAL_PARAMETER_PATTERN = /\$(?:[@*]|[1-9][0-9]*|\{(?:[@*]|[1-9][0-9]*)[^}]*\})/;
+
+function commandExecutesArguments(command: Command): boolean {
+	if (!command.name) return false;
+	const rawWords = [command.name, ...command.suffix].map((word) => word.text);
+	if (!rawWords.some((word) => POSITIONAL_PARAMETER_PATTERN.test(word))) return false;
+	const invocation = extractInvocation([command.name.value, ...command.suffix.map((word) => word.value)]);
+	if ("error" in invocation || !invocation.executable) return true;
+	if (POSITIONAL_PARAMETER_PATTERN.test(invocation.rawExecutable ?? invocation.executable)) return true;
+	if (SHELL_EXECUTION_BUILTINS.has(invocation.executable) || SHELL_RUNNERS.has(invocation.executable)) return true;
+	if (GUARDED_EXECUTABLES.includes(invocation.executable as (typeof GUARDED_EXECUTABLES)[number])) return true;
+	return invocation.executable === "find" && invocation.args.some((word) => ["-exec", "-execdir", "-ok", "-okdir"].includes(word));
+}
+
+function exactArgumentForwardingPrefix(value: unknown): string[] | undefined {
+	let prefix: string[] | undefined;
+	let ambiguous = false;
+	const visit = (node: unknown): void => {
+		if (ambiguous || !node || typeof node !== "object") return;
+		const record = node as Record<string, unknown>;
+		if (record.type === "Command") {
+			const command = node as Command;
+			const directName = command.name?.value;
+			if (directName === "shift" || (directName === "set" && command.suffix.some((word) => word.value === "--"))) {
+				ambiguous = true;
+				return;
+			}
+			const words = command.name ? [command.name, ...command.suffix] : [];
+			const positionalIndex = words.findIndex((word) => ["$@", '"$@"', "${@}", '"${@}"'].includes(word.text));
+			if (positionalIndex !== -1) {
+				if (positionalIndex !== words.length - 1 || prefix) {
+					ambiguous = true;
+					return;
+				}
+				const candidate = words.slice(0, positionalIndex).map((word) => word.value);
+				prefix = candidate[0] === "exec" ? candidate.slice(1) : candidate;
+			}
+			return;
+		}
+		for (const child of Object.values(record)) visit(child);
+	};
+	visit(value);
+	return ambiguous ? undefined : prefix;
+}
+
+function functionExecutesArguments(
+	value: unknown,
+	activeFunctions: ReadonlyMap<string, BashFunction>,
+	checkingFunctions = new Set<BashFunction>(),
+): boolean {
+	if (!value || typeof value !== "object") return false;
+	const record = value as Record<string, unknown>;
+	if (record.type === "Command") {
+		const command = value as Command;
+		if (commandExecutesArguments(command)) return true;
+		const target = command.name ? activeFunctions.get(command.name.value) : undefined;
+		if (!target || checkingFunctions.has(target)) return false;
+		checkingFunctions.add(target);
+		const executesArguments = functionExecutesArguments(target.body, activeFunctions, checkingFunctions);
+		checkingFunctions.delete(target);
+		return executesArguments;
+	}
+	for (const child of Object.values(record)) {
+		if (functionExecutesArguments(child, activeFunctions, checkingFunctions)) return true;
+	}
+	return false;
+}
+
+type FunctionMutationEffect = "none" | "direct" | "persistent";
+
+function strongerMutation(left: FunctionMutationEffect, right: FunctionMutationEffect): FunctionMutationEffect {
+	if (left === "persistent" || right === "persistent") return "persistent";
+	if (left === "direct" || right === "direct") return "direct";
+	return "none";
+}
+
+function functionMutationEffect(
+	value: unknown,
+	activeFunctions: ReadonlyMap<string, BashFunction>,
+	checkingFunctions = new Set<BashFunction>(),
+): FunctionMutationEffect {
+	if (!value || typeof value !== "object") return "none";
+	const record = value as Record<string, unknown>;
+	if (record.type === "Function") return "direct";
+	if (record.type === "Command") {
+		const command = value as Command;
+		if (!command.name) return "none";
+		const directName = command.name.value;
+		const target = activeFunctions.get(directName);
+		if (target) {
+			if (checkingFunctions.has(target)) return "none";
+			checkingFunctions.add(target);
+			const effect = functionMutationEffect(target.body, activeFunctions, checkingFunctions);
+			checkingFunctions.delete(target);
+			return effect;
+		}
+		const invocation = staticShellBuiltinDispatch(command);
+		if (!invocation) return "none";
+		const name = invocation.name;
+		if (name.includes("$") || name === "." || name === "eval" || name === "source" || name === "trap") return "persistent";
+		return name === "unset" ? "direct" : "none";
+	}
+	let effect: FunctionMutationEffect = "none";
+	for (const child of Object.values(record)) {
+		effect = strongerMutation(effect, functionMutationEffect(child, activeFunctions, checkingFunctions));
+	}
+	return effect;
+}
+
+function staticShellBuiltinDispatch(command: Command): { name: string; args: string[] } | undefined {
+	if (!command.name) return undefined;
+	const words = [command.name.value, ...command.suffix.map((word) => word.value)];
+	let index = 0;
+	while (words[index] === "builtin" || words[index] === "command") {
+		const wrapper = words[index];
+		index += 1;
+		while (words[index] === "--" || (wrapper === "command" && words[index] === "-p")) index += 1;
+		if (wrapper === "command" && (words[index] === "-v" || words[index] === "-V")) return undefined;
+	}
+	const name = words[index];
+	return name ? { name, args: words.slice(index + 1) } : undefined;
+}
+
+function removeUnsetFunctions(words: readonly string[], activeFunctions: Map<string, BashFunction>): void {
+	const variableOnly = words.some((word) => word === "-v" || word === "--variable");
+	const functionMode = words.some((word) => word === "-f" || word === "--function");
+	if (variableOnly && !functionMode) return;
+	for (const word of words) {
+		if (word === "--" || word.startsWith("-")) continue;
+		if (word.includes("$")) {
+			activeFunctions.clear();
+			return;
+		}
+		activeFunctions.delete(word);
+	}
+}
+
+function markDefinitelyShadowedCommands(
+	script: ParsedScript,
+	source: string,
+	shadowedCommands: WeakSet<Command>,
+	argumentForwardingCommands: WeakMap<Command, string[]>,
+	opaqueArgumentCommands: WeakMap<Command, string>,
+): void {
+	const activeFunctions = new Map<string, BashFunction>();
+	let functionResolutionUncertain = false;
+	for (const statement of script.commands) {
+		const node = statement.command;
+		if (node.type === "Function") {
+			const name = node.name.value;
+			if (!functionResolutionUncertain && name && !name.includes("/")) activeFunctions.set(name, node);
+			continue;
+		}
+		if (node.type !== "Command") {
+			const effect = functionMutationEffect(node, activeFunctions);
+			if (effect !== "none") activeFunctions.clear();
+			if (effect === "persistent") functionResolutionUncertain = true;
+			continue;
+		}
+		if (!node.name) continue;
+		const name = node.name.value;
+		const activeFunction = activeFunctions.get(name);
+		if (activeFunction && !name.includes("/")) {
+			shadowedCommands.add(node);
+			if (functionExecutesArguments(activeFunction.body, activeFunctions)) {
+				const forwardingPrefix = exactArgumentForwardingPrefix(activeFunction.body);
+				if (forwardingPrefix) argumentForwardingCommands.set(node, forwardingPrefix);
+				else {
+					opaqueArgumentCommands.set(
+						node,
+						`${source.slice(activeFunction.pos, activeFunction.end)} ${node.suffix.map((word) => word.text).join(" ")}`,
+					);
+				}
+			}
+			const effect = functionMutationEffect(activeFunction.body, activeFunctions);
+			if (effect !== "none") activeFunctions.clear();
+			if (effect === "persistent") functionResolutionUncertain = true;
+			continue;
+		}
+		const invocation = staticShellBuiltinDispatch(node);
+		if (invocation?.name === "unset") removeUnsetFunctions(invocation.args, activeFunctions);
+		else if (invocation && [".", "eval", "source", "trap"].includes(invocation.name)) {
+			activeFunctions.clear();
+			functionResolutionUncertain = true;
+		}
+	}
+}
+
+/**
+ * Recover executable command nodes from Bash syntax that the provenance parser
+ * deliberately does not support. unbash supplies the structural AST; argv and
+ * wrapper normalization remain owned by the existing parser helpers.
+ */
+function recoverAstCommands(command: string): RecoveredCommands {
+	const segments: ShellSegment[] = [];
+	const errors: string[] = [];
+	let hasDynamic = false;
+	const seen = new WeakSet<object>();
+	const shadowedCommands = new WeakSet<Command>();
+	const argumentForwardingCommands = new WeakMap<Command, string[]>();
+	const opaqueArgumentCommands = new WeakMap<Command, string>();
+
+	const visit = (value: unknown): void => {
+		if (!value || typeof value !== "object" || seen.has(value)) return;
+		seen.add(value);
+		const record = value as Record<string, unknown>;
+
+		if (record.type === "Command") {
+			const shellCommand = value as Command;
+			const segment = commandSegment(
+				shellCommand,
+				shadowedCommands.has(shellCommand),
+				argumentForwardingCommands.get(shellCommand),
+				opaqueArgumentCommands.get(shellCommand),
+			);
+			if (segment) {
+				segments.push(segment);
+				const invocation = extractInvocation(segment.words);
+				if (!("error" in invocation) && invocation.executable?.includes("$")) hasDynamic = true;
+			}
+		}
+
+		if (record.type === "Script") {
+			const script = value as ParsedScript;
+			markDefinitelyShadowedCommands(
+				script,
+				script.source ?? command,
+				shadowedCommands,
+				argumentForwardingCommands,
+				opaqueArgumentCommands,
+			);
+			for (const error of script.errors ?? []) {
+				errors.push(`${error.message} at offset ${error.pos}`);
+			}
+		}
+
+		// Word parts are lazy and intentionally absent from Object.keys(). Reading
+		// them is required to reach substitutions in words and expandable heredocs.
+		if ("parts" in record && Array.isArray(record.parts)) visit(record.parts);
+		for (const key of Object.keys(record)) {
+			if (key !== "parts") visit(record[key]);
+		}
+	};
+
+	try {
+		visit(parse(command));
+	} catch (error) {
+		errors.push(error instanceof Error ? error.message : String(error));
+	}
+
+	return { segments, errors, hasDynamicExecutable: hasDynamic };
 }
 
 function matchesLeadingOption(option: string, knownSet: ReadonlySet<string>): boolean {
@@ -604,9 +918,12 @@ export {
 	normalizeForInfraScan,
 	containsGuardedText,
 	hasDynamicExecutable,
+	segmentsHaveDynamicExecutable,
+	requiresAstRecovery,
+	recoverAstCommands,
 	parseSimpleCommands,
 	extractInvocation,
 	collectPositionals,
 	isInteractiveInterpreterCommand,
 };
-export type { Invocation, InvocationResult, ParsedCommands, ShellSegment };
+export type { Invocation, InvocationResult, ParsedCommands, RecoveredCommands, ShellSegment };

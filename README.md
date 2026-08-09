@@ -3,7 +3,7 @@
 Global pi extension that wraps the built-in `bash` tool and intercepts direct and GPT-5.6 Code Mode `exec_command` calls, asking for approval before higher-risk infrastructure, cloud, and destructive local-file commands.
 
 > [!WARNING]
-> Setting `guardUnclassifiedCommands` to `false` opts into a less conservative mode: commands run without approval when the extension cannot positively classify them as dangerous. This can allow dangerous behavior hidden by unsupported shell syntax, variables, shell runners, unknown CLI operations, or unread external inputs. The extension is not a sandbox; operating-system and service permissions remain the hard security boundary.
+> Setting `guardUnclassifiedCommands` to `false` opts into a less conservative mode: commands run without approval when the extension cannot positively classify them as dangerous. This can allow dangerous behavior hidden by dynamic executables, opaque shell runners, malformed syntax the Bash AST cannot recover, unknown CLI operations, or unread external inputs. The extension is not a sandbox; operating-system and service permissions remain the hard security boundary.
 
 ```json
 {
@@ -219,7 +219,7 @@ Configure the extension in `~/.pi/agent/infra-command-guard.json`. When `PI_CODI
 }
 ```
 
-With `false`, uncertainty alone is allowed: unsupported shell or wrapper syntax, dynamic executable variables, opaque shell runners, unknown CLI operations, unsupported global-option layouts, indirect guarded names used as search data, and unread inputs such as `gcloud --flags-file`. Positively recognized mutations, sensitive reads, destructive local-file operations, and arbitrary-execution or raw-control capabilities remain guarded—for example `rm`, `kubectl delete`, `vault read`, `terraform apply`, Docker privileged/exec forms, Helm post-renderers, invocation-local Git aliases, and `kubectl --raw`.
+With `false`, uncertainty alone is allowed: unsupported wrapper syntax, dynamic executable variables, opaque shell runners, unrecoverable malformed shell syntax, unknown CLI operations, unsupported global-option layouts, indirect guarded names used as search data, and unread inputs such as `gcloud --flags-file`. Complex Bash syntax is parsed structurally: concrete invocations recovered from functions, loops, groups, pipelines, substitutions, and heredoc-bearing scripts still use the normal tool policy. Positively recognized mutations, sensitive reads, destructive local-file operations, and arbitrary-execution or raw-control capabilities remain guarded—for example `rm`, `kubectl delete`, `vault read`, `terraform apply`, Docker privileged/exec forms, Helm post-renderers, invocation-local Git aliases, and `kubectl --raw`.
 
 Matching `commands.<cli>.requireApproval` rules still require approval. Custom `allow` rules and guard toggles retain their documented precedence. Interactive TTY shell/interpreter sessions and incompatible Code Mode execution channels remain blocked because those channels cannot be guarded at all. Invalid configuration restores the conservative `true` default with every guard enabled and shows a Pi warning.
 

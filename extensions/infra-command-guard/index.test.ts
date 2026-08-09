@@ -1,5 +1,6 @@
 import "./attention.test.ts";
 import "./shell.test.ts";
+import "./bash-ast-recovery.test.ts";
 import "./policy.test.ts";
 import "./cloud-policy-corpus.test.ts";
 import "./command-policy-corpus.test.ts";

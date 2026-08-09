@@ -146,6 +146,7 @@ Tests mirror module ownership (`attention.test.ts`, `shell.test.ts`, `policy.tes
 ### Checks
 
 - Run `npm run check` after changes; it type-checks, tests, and verifies the package contents.
+- Track deferred review findings in GitHub issues and link them from the pull request before completing the review.
 - Preserve the block → structured TUI approval → exact one-time retry flow.
 - Pauses and scoped bypasses are session-scoped, in-memory, and TUI-only. They must never persist to disk or be creatable by the agent. A pause is the operator-controlled full off switch and deliberately bypasses command policy and non-bypassable tool risks, but never the interactive-TTY compatibility block. Scoped bypasses must never bypass interactive-TTY blocks, non-bypassable tool risks, or another guarded operation in a compound command. Bypass rules always include the working-directory scope. An explicit, unambiguous kubectl `--kubeconfig` creates a kubeconfig-wide scope for bypassable kubectl operations in that directory subtree; ambiguous, dynamic, or cwd-uncertain forms receive no bypass offer, and other rules retain normalized command-prefix scope. Changing pause or bypass state invalidates pending and unused one-time approvals.
 - Notification failures must never approve, execute, or suppress a blocked command.

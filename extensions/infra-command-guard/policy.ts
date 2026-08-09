@@ -4,8 +4,10 @@ import {
 	SHELL_RUNNERS,
 	containsGuardedText,
 	extractInvocation,
-	hasDynamicExecutable,
 	parseSimpleCommands,
+	recoverAstCommands,
+	requiresAstRecovery,
+	segmentsHaveDynamicExecutable,
 	type Invocation,
 } from "./shell.ts";
 import {
@@ -183,13 +185,10 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 		: enabledGuardedExecutables(guardSettings);
 	if (enabledExecutables.length === 0) return allow();
 
-	let uncertainty = hasDynamicExecutable(command)
-		? unclassified("This command resolves its executable through a shell variable, which requires manual approval")
-		: undefined;
 	const mentionsEnabledExecutable = containsGuardedText(command, enabledExecutables);
 	const mayDelegateThroughDisabledFind = !guardSettings.find && /-(?:exec|execdir|ok|okdir)\b/.test(command) &&
 		containsGuardedText(command, ["find"]);
-	if (!mentionsEnabledExecutable && !mayDelegateThroughDisabledFind && !uncertainty) return allow();
+	if (!mentionsEnabledExecutable && !mayDelegateThroughDisabledFind && !command.includes("$")) return allow();
 	const kubectlOverrides = commandOverrides.kubectl;
 	if (
 		guardSettings.kubectl &&
@@ -199,22 +198,51 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 	) return allow();
 
 	const parsed = parseSimpleCommands(command);
-	if ("error" in parsed) {
-		return unclassified(`This command uses shell syntax the infra guard cannot classify safely (${parsed.error})`);
+	const recovered = requiresAstRecovery(parsed) ? recoverAstCommands(command) : undefined;
+	const segments = recovered?.segments ?? ("error" in parsed ? [] : parsed.segments);
+	let uncertainty = recovered?.hasDynamicExecutable || segmentsHaveDynamicExecutable(segments)
+		? unclassified("This command resolves its executable through a shell variable, which requires manual approval")
+		: undefined;
+	if (!mentionsEnabledExecutable && !mayDelegateThroughDisabledFind && !uncertainty) return allow();
+	if (recovered) {
+		const astDiagnostic = recovered.errors[0] ? `; Bash AST diagnostic: ${recovered.errors[0]}` : "";
+		uncertainty ??= unclassified(
+			"error" in parsed
+				? `This command uses shell syntax outside the infra guard's provenance parser (${parsed.error}${astDiagnostic})`
+				: `This command uses shell control flow outside the infra guard's provenance parser${astDiagnostic}`,
+		);
+		if (recovered.hasDynamicExecutable) {
+			uncertainty = unclassified("This command resolves its executable through a shell expansion, which requires manual approval");
+		}
 	}
 	const enabledIndirectTextGuards = enabledExecutables === GUARDED_EXECUTABLES
 		? DEFAULT_ENABLED_INDIRECT_TEXT_GUARDS
 		: enabledExecutables.filter((executable) => INDIRECT_TEXT_GUARDS.has(executable));
 
-	for (const segment of parsed.segments) {
-		const invocation = extractInvocation(segment.words);
+	for (const segment of segments) {
+		if (segment.opaqueArgumentText) {
+			if (containsGuardedText(segment.opaqueArgumentText, enabledExecutables)) {
+				return knownRisk("A shell function can execute guarded call arguments, which requires manual approval");
+			}
+			uncertainty ??= unclassified("A shell function can execute transformed call arguments, which requires manual approval");
+			continue;
+		}
+		if (segment.shadowedExecutable && segment.forwardedWords === undefined) {
+			uncertainty ??= unclassified(
+				`This command resolves ${segment.shadowedExecutable} to a shell function, which requires manual approval`,
+			);
+			continue;
+		}
+		const segmentWords = segment.forwardedWords ?? segment.words;
+		const segmentBare = segment.forwardedBare ?? segment.bare;
+		const invocation = extractInvocation(segmentWords);
 		if ("error" in invocation) {
 			uncertainty ??= unclassified(`This command uses a wrapper the infra guard cannot classify safely (${invocation.error})`);
 			continue;
 		}
 
 		if (!invocation.executable) {
-			if (containsGuardedText(segment.words.join(" "), enabledExecutables)) {
+			if (containsGuardedText(segmentWords.join(" "), enabledExecutables)) {
 				uncertainty ??= unclassified("This command assigns guarded tooling for indirect shell execution, which requires manual approval");
 			}
 			continue;
@@ -230,7 +258,7 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 			continue;
 		}
 
-		const segmentText = segment.words.join(" ");
+		const segmentText = segmentWords.join(" ");
 		const segmentMentionsGuardedTool = containsGuardedText(segmentText, enabledExecutables);
 		if (SHELL_RUNNERS.has(invocation.executable) && segmentMentionsGuardedTool) {
 			uncertainty ??= unclassified(`This command delegates guarded execution through ${invocation.executable}, which requires manual approval`);
@@ -275,7 +303,7 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 			continue;
 		}
 
-		if (containsGuardedText(segment.bare, enabledIndirectTextGuards)) {
+		if (containsGuardedText(segmentBare, enabledIndirectTextGuards)) {
 			uncertainty ??= unclassified(
 				`This command invokes guarded tooling through ${invocation.executable}, which requires manual approval`,
 			);
