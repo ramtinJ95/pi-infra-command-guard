@@ -9,6 +9,7 @@ import {
 	requiresAstRecovery,
 	segmentsHaveDynamicExecutable,
 	type Invocation,
+	type ShellSegment,
 } from "./shell.ts";
 import {
 	DEFAULT_COMMAND_POLICY_SETTINGS,
@@ -178,8 +179,84 @@ function findRunnerCodeUsesPlaceholder(invocation: Invocation): boolean {
 	return false;
 }
 
+function classifyInvocation(
+	invocation: Invocation,
+	settings: CommandPolicySettings,
+	segmentWords: readonly string[],
+	bareText: string,
+	enabledExecutables: readonly GuardedExecutable[] = enabledGuardedExecutables(settings.guards),
+): PolicyDecision {
+	if (enabledExecutables.length === 0 || invocation.lookupOnly) return allow();
+	const segmentText = segmentWords.join(" ");
+	if (!invocation.executable) {
+		return containsGuardedText(segmentText, enabledExecutables)
+			? unclassified("This command assigns guarded tooling for indirect shell execution, which requires manual approval")
+			: allow();
+	}
+	if (invocation.executable.includes("$")) {
+		return unclassified("This command resolves its executable through a shell variable, which requires manual approval");
+	}
+	if (SHELL_CONTROL_KEYWORDS.has(invocation.executable)) {
+		return unclassified(`This command uses shell control flow (${invocation.executable}), which requires manual approval`);
+	}
+	if (SHELL_EXECUTION_BUILTINS.has(invocation.executable)) {
+		return unclassified(`This command uses shell execution syntax (${invocation.executable}), which requires manual approval`);
+	}
+	if (SHELL_RUNNERS.has(invocation.executable) && containsGuardedText(segmentText, enabledExecutables)) {
+		return unclassified(`This command delegates guarded execution through ${invocation.executable}, which requires manual approval`);
+	}
+	let uncertainty: PolicyDecision | undefined;
+	if (invocation.executable === "find") {
+		const delegatedDecision = evaluateFindDelegatedCommands(invocation, settings);
+		if (delegatedDecision && !delegatedDecision.allow) {
+			if (delegatedDecision.basis !== "unclassified") return delegatedDecision;
+			uncertainty = delegatedDecision;
+		}
+	}
+	if (invocation.executable === "rsync") {
+		const delegatedGuards = enabledExecutables.filter((executable) => executable !== "rsync");
+		if (rsyncExecutableOptionValues(invocation.args).some((value) => containsGuardedText(value, delegatedGuards))) {
+			return knownRisk("rsync executable option delegates to guarded tooling, which requires manual approval");
+		}
+	}
+
+	const evaluator = toolEvaluator(invocation.executable);
+	if (evaluator) {
+		const executable = invocation.executable as GuardedExecutable;
+		if (!settings.guards[executable]) return uncertainty ?? allow();
+		const override = matchingCommandOverride(executable, invocation, settings.commands);
+		if (override?.action === "requireApproval") {
+			return explicitRule(`Custom command rule requires approval for ${executable} ${override.rule}`);
+		}
+		const decision = override?.action === "allow"
+			? evaluateNonBypassableRisk(executable, invocation) ?? allow()
+			: evaluator(invocation);
+		if (!decision.allow) {
+			if (decision.basis !== "unclassified") return decision;
+			uncertainty ??= decision;
+		}
+		return uncertainty ?? allow();
+	}
+
+	const indirectTextGuards = enabledExecutables === GUARDED_EXECUTABLES
+		? DEFAULT_ENABLED_INDIRECT_TEXT_GUARDS
+		: enabledExecutables.filter((executable) => INDIRECT_TEXT_GUARDS.has(executable));
+	if (containsGuardedText(bareText, indirectTextGuards)) {
+		uncertainty ??= unclassified(
+			`This command invokes guarded tooling through ${invocation.executable}, which requires manual approval`,
+		);
+	}
+	return uncertainty ?? allow();
+}
+
+function allowsPortForwardException(command: string, settings: CommandPolicySettings): boolean {
+	const overrides = settings.commands.kubectl;
+	return settings.guards.kubectl && overrides.allow.length === 0 && overrides.requireApproval.length === 0 &&
+		isKubectlPortForwardOnlyCommand(command);
+}
+
 function classifyCommand(command: string, settings: CommandPolicySettings): PolicyDecision {
-	const { guards: guardSettings, commands: commandOverrides } = settings;
+	const { guards: guardSettings } = settings;
 	const enabledExecutables = settings === DEFAULT_COMMAND_POLICY_SETTINGS
 		? GUARDED_EXECUTABLES
 		: enabledGuardedExecutables(guardSettings);
@@ -189,13 +266,7 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 	const mayDelegateThroughDisabledFind = !guardSettings.find && /-(?:exec|execdir|ok|okdir)\b/.test(command) &&
 		containsGuardedText(command, ["find"]);
 	if (!mentionsEnabledExecutable && !mayDelegateThroughDisabledFind && !command.includes("$")) return allow();
-	const kubectlOverrides = commandOverrides.kubectl;
-	if (
-		guardSettings.kubectl &&
-		kubectlOverrides.allow.length === 0 &&
-		kubectlOverrides.requireApproval.length === 0 &&
-		isKubectlPortForwardOnlyCommand(command)
-	) return allow();
+	if (allowsPortForwardException(command, settings)) return allow();
 
 	const parsed = parseSimpleCommands(command);
 	const recovered = requiresAstRecovery(parsed) ? recoverAstCommands(command) : undefined;
@@ -215,10 +286,6 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 			uncertainty = unclassified("This command resolves its executable through a shell expansion, which requires manual approval");
 		}
 	}
-	const enabledIndirectTextGuards = enabledExecutables === GUARDED_EXECUTABLES
-		? DEFAULT_ENABLED_INDIRECT_TEXT_GUARDS
-		: enabledExecutables.filter((executable) => INDIRECT_TEXT_GUARDS.has(executable));
-
 	for (const segment of segments) {
 		if (segment.opaqueArgumentText) {
 			if (containsGuardedText(segment.opaqueArgumentText, enabledExecutables)) {
@@ -241,85 +308,41 @@ function classifyCommand(command: string, settings: CommandPolicySettings): Poli
 			continue;
 		}
 
-		if (!invocation.executable) {
-			if (containsGuardedText(segmentWords.join(" "), enabledExecutables)) {
-				uncertainty ??= unclassified("This command assigns guarded tooling for indirect shell execution, which requires manual approval");
-			}
-			continue;
-		}
-
-		if (SHELL_CONTROL_KEYWORDS.has(invocation.executable)) {
-			uncertainty ??= unclassified(`This command uses shell control flow (${invocation.executable}), which requires manual approval`);
-			continue;
-		}
-
-		if (SHELL_EXECUTION_BUILTINS.has(invocation.executable)) {
-			uncertainty ??= unclassified(`This command uses shell execution syntax (${invocation.executable}), which requires manual approval`);
-			continue;
-		}
-
-		const segmentText = segmentWords.join(" ");
-		const segmentMentionsGuardedTool = containsGuardedText(segmentText, enabledExecutables);
-		if (SHELL_RUNNERS.has(invocation.executable) && segmentMentionsGuardedTool) {
-			uncertainty ??= unclassified(`This command delegates guarded execution through ${invocation.executable}, which requires manual approval`);
-			continue;
-		}
-		if (invocation.executable === "find") {
-			const delegatedDecision = evaluateFindDelegatedCommands(invocation, settings);
-			if (delegatedDecision && !delegatedDecision.allow) {
-				if (delegatedDecision.basis !== "unclassified") return delegatedDecision;
-				uncertainty ??= delegatedDecision;
-			}
-		}
-		if (invocation.executable === "rsync") {
-			const delegatedGuards = enabledExecutables.filter((executable) => executable !== "rsync");
-			if (rsyncExecutableOptionValues(invocation.args).some((value) => containsGuardedText(value, delegatedGuards))) {
-				return knownRisk("rsync executable option delegates to guarded tooling, which requires manual approval");
-			}
-		}
-
-		const evaluator = toolEvaluator(invocation.executable);
-		if (evaluator) {
-			const executable = invocation.executable as GuardedExecutable;
-			if (guardSettings[executable]) {
-				const override = matchingCommandOverride(executable, invocation, commandOverrides);
-				if (override?.action === "requireApproval") {
-					return explicitRule(`Custom command rule requires approval for ${executable} ${override.rule}`);
-				}
-				if (override?.action === "allow") {
-					const nonBypassableRisk = evaluateNonBypassableRisk(executable, invocation);
-					if (nonBypassableRisk) {
-						if (nonBypassableRisk.basis !== "unclassified") return nonBypassableRisk;
-						uncertainty ??= nonBypassableRisk;
-					}
-					continue;
-				}
-				const decision = evaluator(invocation);
-				if (!decision.allow) {
-					if (decision.basis !== "unclassified") return decision;
-					uncertainty ??= decision;
-				}
-			}
-			continue;
-		}
-
-		if (containsGuardedText(segmentBare, enabledIndirectTextGuards)) {
-			uncertainty ??= unclassified(
-				`This command invokes guarded tooling through ${invocation.executable}, which requires manual approval`,
-			);
+		const decision = classifyInvocation(invocation, settings, segmentWords, segmentBare, enabledExecutables);
+		if (!decision.allow) {
+			if (decision.basis !== "unclassified") return decision;
+			uncertainty ??= decision;
 		}
 	}
 
 	return uncertainty ?? allow();
 }
 
+function applyClassificationMode(decision: PolicyDecision, settings: CommandPolicySettings): PolicyDecision {
+	if (!decision.allow && decision.basis === "unclassified" && !settings.guardUnclassifiedCommands) return allow();
+	return decision;
+}
+
+// Consumers that already parsed a shell segment must not reconstruct shell
+// source from decoded argv: doing so changes quoting, empty words, and escapes.
+function evaluateInvocation(invocation: Invocation, settings: CommandPolicySettings, segment: ShellSegment): PolicyDecision {
+	const enabledExecutables = enabledGuardedExecutables(settings.guards);
+	const mayDelegateThroughDisabledFind = invocation.executable === "find" && !settings.guards.find &&
+		invocation.args.some((arg) => ["-exec", "-execdir", "-ok", "-okdir"].includes(arg));
+	if (
+		!containsGuardedText(segment.words.join(" "), enabledExecutables) &&
+		!invocation.executable?.includes("$") && !mayDelegateThroughDisabledFind
+	) return allow();
+	// Raw tokens retain the script's own quoting in a shell-wrapped port-forward.
+	if (allowsPortForwardException(segment.rawWords.join(" "), settings)) return allow();
+	return applyClassificationMode(classifyInvocation(invocation, settings, segment.words, segment.bare, enabledExecutables), settings);
+}
+
 function evaluateCommand(
 	command: string,
 	settings: CommandPolicySettings = DEFAULT_COMMAND_POLICY_SETTINGS,
 ): PolicyDecision {
-	const decision = classifyCommand(command, settings);
-	if (!decision.allow && decision.basis === "unclassified" && !settings.guardUnclassifiedCommands) return allow();
-	return decision;
+	return applyClassificationMode(classifyCommand(command, settings), settings);
 }
 
 export {
@@ -344,5 +367,5 @@ export {
 	evaluateFind,
 	evaluateRsync,
 } from "./tool-policies.ts";
-export { evaluateCommand };
+export { evaluateCommand, evaluateInvocation };
 export type { PolicyDecision } from "./tool-policies.ts";

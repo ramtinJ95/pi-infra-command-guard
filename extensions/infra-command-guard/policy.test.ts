@@ -7,12 +7,94 @@ import {
 	type CommandPolicySettings,
 	type GuardedExecutable,
 } from "./guarded-executables.ts";
-import { evaluateCommand } from "./policy.ts";
+import { evaluateCommand, evaluateInvocation } from "./policy.ts";
+import { extractInvocation, parseSimpleCommands } from "./shell.ts";
 import { test } from "./test-harness.ts";
 
 function policyWith(overrides: Partial<CommandPolicySettings>): CommandPolicySettings {
 	return { ...DEFAULT_COMMAND_POLICY_SETTINGS, ...overrides };
 }
+
+test("parsed invocation evaluation preserves command decisions, basis, and reasons", () => {
+	const commands = [
+		'kubectl --context "" delete pod api', '"kubectl" get secrets', 'kubectl get pods',
+		'kubectl get --raw=/api/v1', 'terraform output', 'terraform plan', 'helm list',
+		'helm template api --post-renderer ./renderer', 'git -c alias.x="!echo test" x',
+		'aws ec2 describe-instances', 'aws unknown operation', 'docker compose --dry-run=false down --volumes',
+		'vault read "secret/a b"', 'rm ""', 'find . -exec rm {} \\;',
+		'rsync --delete source/ destination/', 'grep "kubectl" README.md', 'grep kubectl README.md',
+		'exec ls', 'source ./safe.sh', '$TOOL target', 'K=kubectl',
+		`TOOL="rm" bash -c '"$TOOL" /tmp/victim'`, `env TOOL="rm" bash -c '"$TOOL" /tmp/victim'`,
+		'bash -lc "kubectl port-forward service/api 8080:80"',
+	];
+	for (const guardUnclassifiedCommands of [true, false]) {
+		for (const overrides of [{}, { guards: { ...DEFAULT_GUARD_SETTINGS, rm: false } }, {
+			commands: { ...DEFAULT_COMMAND_OVERRIDES, kubectl: { allow: ["delete", "get"], requireApproval: ["get pods"] } },
+		}]) {
+			const settings = policyWith({ guardUnclassifiedCommands, ...overrides });
+			for (const command of commands) {
+				const parsed = parseSimpleCommands(command);
+				assert.ok(!("error" in parsed), command);
+				assert.equal(parsed.segments.length, 1, command);
+				const segment = parsed.segments[0];
+				const invocation = extractInvocation(segment.words);
+				assert.ok(!("error" in invocation), command);
+				assert.deepEqual(evaluateInvocation(invocation, settings, segment), evaluateCommand(command, settings), command);
+			}
+		}
+	}
+});
+
+test("guarded-text scans retain assignments and wrappers outside stripped argv", () => {
+	for (const command of ['K=kubectl', `TOOL="rm" bash -c '"$TOOL" /tmp/victim'`, `env TOOL="rm" bash -c '"$TOOL" /tmp/victim'`]) {
+		assert.equal(evaluateCommand(command).allow, false, command);
+		assert.equal(evaluateCommand(command, policyWith({ guardUnclassifiedCommands: false })).allow, true, command);
+	}
+});
+
+test("port-forward exceptions require the actual operation and retain raw-control checks", () => {
+	for (const guardUnclassifiedCommands of [true, false]) {
+		const settings = policyWith({ guardUnclassifiedCommands });
+		for (const command of [
+			"kubectl delete pod port-forward",
+			"kubectl get --raw /api/v1/namespaces/port-forward/secrets",
+			"kubectl port-forward service/api 8080:80 --raw=/api/v1",
+			"kubectl port-forward service/api 8080:80 & kubectl delete pod port-forward",
+		]) {
+			assert.equal(evaluateCommand(command, settings).allow, false, command);
+		}
+	}
+	for (const command of [
+		"kubectl port-forward service/api 8080:80",
+		"nohup kubectl --context staging port-forward service/api 8080:80 >/tmp/pf.log 2>&1 &",
+		'bash -lc "kubectl --context staging port-forward service/api 8080:80"',
+		'bash -l -c "kubectl port-forward service/api 8080:80"',
+		'xargs kubectl port-forward service/api 8080:80',
+		'xargs -n 1 kubectl --context staging port-forward service/api 8080:80',
+		'xargs -I{} kubectl port-forward service/{} 8080:80',
+		"kubectl port-forward service/api 8080:80 & kubectl port-forward service/db 5432:5432 &",
+	]) assert.equal(evaluateCommand(command).allow, true, command);
+	assert.equal(evaluateCommand('bash -lc "kubectl delete pod port-forward"').allow, false);
+	assert.equal(evaluateCommand('bash script.sh -c "kubectl port-forward service/api 8080:80"').allow, false);
+	assert.equal(evaluateCommand('xargs kubectl delete pod port-forward').allow, false);
+	assert.equal(evaluateCommand('xargs kubectl get --raw /api/v1/port-forward').allow, false);
+});
+
+test("Compose deletion previews honor dry-run values and repeated-option order", () => {
+	for (const endpoint of ["", "--context production "]) {
+		for (const [flags, allowed] of [
+			["--dry-run", true], ["--dry-run=true", true], ["--dry-run=1", true],
+			["--dry-run=false", false], ["--dry-run=0", false],
+			["--dry-run --dry-run=false", false], ["--dry-run=false --dry-run", true],
+			["--dry-run=true --dry-run=false", false], ["--dry-run=false --dry-run=true", true],
+		] as const) {
+			for (const action of ["down --volumes", "rm api"]) {
+				const command = `docker ${endpoint}compose ${flags} ${action}`;
+				assert.equal(evaluateCommand(command).allow, allowed, command);
+			}
+		}
+	}
+});
 
 test("rm classification covers executable paths and common wrappers", () => {
 	for (const command of [

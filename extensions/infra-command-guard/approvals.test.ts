@@ -138,7 +138,7 @@ test("classified-dangerous-only mode skips uncertainty approvals but keeps known
 
 test("interactive interpreters are denied rather than approvable", () => {
 	const store = new ApprovalStore(() => 1_000, () => "unused-request");
-	for (const command of ["bash", "sudo /bin/zsh", "env python3.12", "exec node"]) {
+	for (const command of ["bash", "sudo /bin/zsh", "env python3.12", "exec node", "true; bash", "echo ready && exec /bin/sh", "(python3)", "bash &", "if true; then bash; fi"]) {
 		const identity = executionIdentity("code-mode-exec-command", { cmd: command, tty: true }, "/tmp")!;
 		const guarded = guardExecution(store, identity, "tui");
 		assert.equal(guarded.allow, false, command);
@@ -184,10 +184,16 @@ test("interactive interpreter blocks ignore pauses and bypass rules", () => {
 	const store = new ApprovalStore(() => 1_000, () => "tty-request");
 	const bypasses = new GuardBypassStore(() => 1_000);
 	bypasses.pause(10 * 60 * 1000);
-	const identity = executionIdentity("bash", { command: "bash", tty: true }, "/tmp")!;
-	const guarded = guardExecution(store, identity, "tui", DEFAULT_COMMAND_POLICY_SETTINGS, bypasses);
-	assert.equal(guarded.allow, false);
-	assert.match(guarded.reason, /interactive shell and interpreter sessions/);
+	for (const command of ["bash", "true; bash", "(python3)"]) {
+		const identity = executionIdentity("bash", { command, tty: true }, "/tmp")!;
+		const pending = store.createPending(identity, "test");
+		store.approve(pending.id, command, "test");
+		const guarded = guardExecution(store, identity, "tui", DEFAULT_COMMAND_POLICY_SETTINGS, bypasses);
+		assert.equal(guarded.allow, false, command);
+		assert.equal(guarded.requestId, undefined, command);
+		assert.match(guarded.reason, /interactive shell and interpreter sessions/);
+		assert.equal(store.consume(identity), true, "interactive restriction precedes grants");
+	}
 });
 
 test("kubeconfig bypasses cover guarded kubectl commands in the stored cwd only", () => {

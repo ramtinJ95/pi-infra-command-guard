@@ -103,6 +103,30 @@ function createGenerator(seed: number): () => number {
 	};
 }
 
+test("function forwarding only trusts exact quoted arguments on every executing path", () => {
+	for (const command of [
+		'run(){ printf x "$@"; "$1" "$2"; }; run rm /tmp/victim',
+		'run(){ "$1" "$2"; printf x "$@"; }; run rm /tmp/victim',
+		'run(){ printf x "$@"; $@; }; run "rm /tmp/victim"',
+		'run(){ $@; }; run "rm /tmp/victim"',
+		'run(){ builtin shift; "$@"; }; run x rm /tmp/victim',
+		'run(){ printf x "$@"; set rm /tmp/victim; "$@"; }; run true',
+		'run(){ printf x "$@"; eval "set -- rm /tmp/victim"; "$@"; }; run true',
+		'run(){ printf x "$@"; builtin eval "set -- rm /tmp/victim"; "$@"; }; run true',
+		'run(){ printf x "$@"; source ./args.sh; "$@"; }; run rm /tmp/victim',
+	]) {
+		const decision = evaluateCommand(command, RELAXED);
+		assert.equal(decision.allow, false, command);
+		assert.equal(decision.basis, "knownRisk", command);
+	}
+	assert.equal(evaluateCommand('run(){ printf x "$@"; "$@"; }; run kubectl get pods', RELAXED).allow, true);
+	assert.equal(evaluateCommand('run(){ printf x "$@"; "$@"; }; run rm /tmp/victim', RELAXED).allow, false);
+	assert.equal(evaluateCommand('run(){ printf x "$@"; }; run rm /tmp/victim', RELAXED).allow, true);
+	for (const options of ["-e", "-o pipefail", "-euo pipefail"]) {
+		assert.equal(evaluateCommand(`run(){ set ${options}; "$@"; }; run kubectl get pods`, RELAXED).allow, true, options);
+	}
+});
+
 const GENERATED_CASES_PER_CATEGORY = 100;
 const GENERATED_CATEGORIES = [
 	"quotes",
@@ -119,14 +143,14 @@ test("deterministic generated Bash AST corpus has zero false positives and false
 	const random = createGenerator(0x5eedc0de);
 	let safeCases = 0;
 	let riskyCases = 0;
-	let falsePositives = 0;
-	let falseNegatives = 0;
 	const riskCommands = ["apply -f app.yaml", "delete pod api", "patch pod api -p '{}'", "exec pod/api -- sh"];
 
 	for (const category of GENERATED_CATEGORIES) {
+		const coveredRisks = new Set<string>();
 		for (let index = 0; index < GENERATED_CASES_PER_CATEGORY; index += 1) {
 			const nonce = `${category.replaceAll("-", "_")}_${random().toString(36)}`;
-			const risk = riskCommands[random() % riskCommands.length];
+			const risk = riskCommands[index % riskCommands.length];
+			coveredRisks.add(risk);
 			const safeByCategory: Record<(typeof GENERATED_CATEGORIES)[number], string> = {
 				quotes: `value=$(printf '%s' ${nonce}); printf '%s\\n' "kubectl ${risk}" "$value"`,
 				comments: `value=$(printf '%s' ${nonce}); # kubectl ${risk}\nprintf '%s\\n' "$value"`,
@@ -150,13 +174,14 @@ test("deterministic generated Bash AST corpus has zero false positives and false
 
 			safeCases += 1;
 			riskyCases += 1;
-			if (!evaluateCommand(safeByCategory[category], RELAXED).allow) falsePositives += 1;
-			if (evaluateCommand(riskyByCategory[category], RELAXED).allow) falseNegatives += 1;
+			assert.equal(evaluateCommand(safeByCategory[category], RELAXED).allow, true, `Safe script blocked: ${safeByCategory[category]}`);
+			assert.equal(evaluateCommand(riskyByCategory[category], RELAXED).allow, false, `Risky script allowed: ${riskyByCategory[category]}`);
 		}
+		assert.deepEqual([...coveredRisks], riskCommands, `${category} must exercise every operation`);
 	}
 
-	assert.equal(falsePositives, 0, `${falsePositives}/${safeCases} generated safe scripts were blocked`);
-	assert.equal(falseNegatives, 0, `${falseNegatives}/${riskyCases} generated risky scripts were allowed`);
+	assert.equal(safeCases, GENERATED_CASES_PER_CATEGORY * GENERATED_CATEGORIES.length);
+	assert.equal(riskyCases, safeCases);
 });
 
 if (import.meta.main) await runTests();

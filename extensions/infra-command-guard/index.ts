@@ -377,8 +377,10 @@ export default function createExtension(pi: ExtensionAPI) {
 		...bashTool,
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 			syncBypassStatus(ctx);
-			const identity = executionIdentity("bash", params, ctx?.cwd ?? process.cwd());
-			if (!identity) return bashTool.execute(toolCallId, params, signal, onUpdate);
+			const cwd = ctx?.cwd ?? process.cwd();
+			const identity = executionIdentity("bash", params, cwd);
+			const delegatedTool = createBashTool(identity?.cwd ?? cwd);
+			if (!identity) return delegatedTool.execute(toolCallId, params, signal, onUpdate);
 			const policySettings = currentPolicySettings(ctx);
 			const guarded = guardExecution(
 				currentApprovals(),
@@ -388,7 +390,7 @@ export default function createExtension(pi: ExtensionAPI) {
 				currentBypasses(),
 			);
 			if (!guarded.allow) throw new Error(guarded.reason);
-			return bashTool.execute(toolCallId, params, signal, onUpdate);
+			return delegatedTool.execute(toolCallId, params, signal, onUpdate);
 		},
 	});
 

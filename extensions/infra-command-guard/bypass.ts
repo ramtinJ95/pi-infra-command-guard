@@ -1,9 +1,9 @@
 import { homedir } from "node:os";
 import { resolve, sep } from "node:path";
 import type { CommandPolicySettings, GuardedExecutable } from "./guarded-executables.ts";
-import { evaluateCommand } from "./policy.ts";
+import { evaluateInvocation } from "./policy.ts";
 import { extractInvocation, parseSimpleCommands, type Invocation } from "./shell.ts";
-import { evaluateNonBypassableRisk, normalizeOverrideArguments } from "./tool-policies.ts";
+import { evaluateNonBypassableRisk, normalizedOverrideArgumentIndices } from "./tool-policies.ts";
 import type { ExecutionIdentity } from "./approvals.ts";
 
 const TEN_MINUTES_MS = 10 * 60 * 1000;
@@ -224,19 +224,38 @@ const PATH_SCOPED_OPTION_NAMES = new Set([
 	"--tls-key",
 ]);
 
-function normalizeBypassTokens(executable: GuardedExecutable, args: readonly string[]): string[] {
-	const rawTokens = normalizeOverrideArguments(executable, [...args], PATH_SCOPED_OPTION_NAMES);
-	return rawTokens.map((token) => {
+function normalizePrefixPath(value: string, rawValue: string, attached: boolean): string | undefined {
+	if (!value.startsWith("~") && !isHomeReference(value)) return value;
+	// Reuse kubeconfig expansion rules, but retain literal home markers as
+	// literal prefix tokens. Ambiguous mixed quoting receives no bypass offer.
+	if (usesHomeExpansion(value, rawValue, attached)) {
+		const expanded = expandHomePath(value);
+		return expanded.startsWith("~") ? undefined : resolve(expanded);
+	}
+	if (
+		rawValue === `'${value}'` ||
+		rawValue === `\\${value}` ||
+		(value.startsWith("~") && (rawValue === `"${value}"` || (attached && rawValue === value))) ||
+		(isHomeReference(value) && rawValue === `"\\${value}"`)
+	) return value;
+	return undefined;
+}
+
+function normalizeBypassTokens(executable: GuardedExecutable, args: readonly string[], rawArgs: readonly string[]): string[] | undefined {
+	const tokens: string[] = [];
+	for (const index of normalizedOverrideArgumentIndices(executable, args, PATH_SCOPED_OPTION_NAMES)) {
+		const token = args[index];
+		const rawToken = rawArgs[index];
+		if (rawToken === undefined) return undefined;
 		const equalsIndex = token.indexOf("=");
-		if (equalsIndex !== -1) {
-			const value = token.slice(equalsIndex + 1);
-			if (value.includes("/") || value.startsWith("~")) {
-				return `${token.slice(0, equalsIndex + 1)}${expandHomePath(value)}`;
-			}
-			return token;
-		}
-		return token.includes("/") || token.startsWith("~") ? expandHomePath(token) : token;
-	});
+		const attached = equalsIndex !== -1;
+		const value = attached ? token.slice(equalsIndex + 1) : token;
+		const rawValue = attached ? rawToken.slice(rawToken.indexOf("=") + 1) : rawToken;
+		const normalized = normalizePrefixPath(value, rawValue, attached);
+		if (normalized === undefined) return undefined;
+		tokens.push(attached ? `${token.slice(0, equalsIndex + 1)}${normalized}` : normalized);
+	}
+	return tokens;
 }
 
 function kubectlKubeconfigScope(
@@ -279,7 +298,8 @@ function isHomeReference(value: string): boolean {
 }
 
 function usesHomeExpansion(value: string, rawValue: string, attached: boolean): boolean {
-	return isHomeReference(value) || (!attached && value.startsWith("~") && rawValue === value);
+	return (isHomeReference(value) && (rawValue === value || rawValue === `"${value}"`)) ||
+		(!attached && value.startsWith("~") && rawValue === value);
 }
 
 function tokenUsesHomeExpansion(value: string, rawValue: string): boolean {
@@ -293,14 +313,10 @@ function tokenUsesHomeExpansion(value: string, rawValue: string): boolean {
 function normalizeKubeconfigPath(value: string, rawValue: string, attached: boolean, cwd: string): string | undefined {
 	if (value.includes("\0")) return undefined;
 	if (value.startsWith("/") && !value.includes("$") && !value.startsWith("~")) return resolve(value);
-	if (value.startsWith("~")) {
-		if (attached || rawValue !== value) return undefined;
+	if (value.startsWith("~") || isHomeReference(value)) {
+		if (!usesHomeExpansion(value, rawValue, attached)) return undefined;
 		const expanded = expandHomePath(value);
 		return expanded.startsWith("~") ? undefined : resolve(expanded);
-	}
-	if (isHomeReference(value)) {
-		if (rawValue !== value && rawValue !== `"${value}"`) return undefined;
-		return resolve(expandHomePath(value));
 	}
 	if (value.includes("$")) return undefined;
 	return resolve(cwd, value);
@@ -346,8 +362,6 @@ function invocationBypassCandidate(
 ): MatchingInvocation | undefined {
 	const guardSettings = settings.guards;
 	if (!guardSettings[executable]) return undefined;
-	const decision = evaluateCommand([executable, ...invocation.args].join(" "), settings);
-	if (decision.allow) return undefined;
 	const nonBypassable = evaluateNonBypassableRisk(executable, invocation);
 	if (nonBypassable && nonBypassable.basis !== "unclassified") return undefined;
 	if (homeUncertain && invocation.args.some((arg, index) => tokenUsesHomeExpansion(arg, rawArgs[index] ?? arg))) return undefined;
@@ -356,8 +370,8 @@ function invocationBypassCandidate(
 		if (kubeconfig.kind === "invalid") return undefined;
 		if (kubeconfig.kind === "scope") return { executable, scope: kubeconfig.scope };
 	}
-	const normalizedPrefix = normalizeBypassTokens(executable, invocation.args);
-	if (normalizedPrefix.length === 0) return undefined;
+	const normalizedPrefix = normalizeBypassTokens(executable, invocation.args, rawArgs);
+	if (!normalizedPrefix || normalizedPrefix.length === 0) return undefined;
 	return { executable, scope: { kind: "command-prefix", tokens: normalizedPrefix } };
 }
 
@@ -375,7 +389,7 @@ function findMatchingBypassRule(
 		if ("error" in invocation || !invocation.executable) return undefined;
 		homeUncertain ||= invocationMakesHomeUncertain(invocation, segment.words);
 		const segmentChangesCwd = invocation.executable === "cd" || invocation.executable === "pushd" || invocation.executable === "popd";
-		if (evaluateCommand(segment.bare, settings).allow) {
+		if (evaluateInvocation(invocation, settings, segment).allow) {
 			cwdUncertain ||= segmentChangesCwd;
 			homeUncertain = true;
 			continue;
