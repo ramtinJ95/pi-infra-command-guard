@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-09-05
+
 ### Changed
 
 - Reused parsed-invocation policy evaluation and provenance-preserving option normalization in scoped bypass checks instead of reconstructing shell commands.
@@ -127,7 +129,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial infrastructure command guard with structured approval flow and CI packaging checks.
 
-[Unreleased]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.8.0...v0.8.1
