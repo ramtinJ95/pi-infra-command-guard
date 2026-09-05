@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -495,48 +495,82 @@ test("approval requests do not leak across Pi 0.84 extension instances", async (
 });
 
 test("scoped bypasses apply across bash and exec_command paths within the stored cwd", async () => {
-	const events = createTestEventBus().facade();
-	const { handlers, pi, tools } = createHarness(events);
+	const cwd = realpathSync(mkdtempSync(join(tmpdir(), "infra-guard-bash-")));
+	try {
+		const executable = join(cwd, "kubectl");
+		writeFileSync(executable, '#!/bin/sh\nprintf "%s\\n" "fake-kubectl" "$PWD" "$@"\n', { mode: 0o700 });
+		const kubeconfig = join(cwd, "unused-kubeconfig");
+		const events = createTestEventBus().facade();
+		const { handlers, pi, tools } = createHarness(events);
+		const toolCall = handlers.get("tool_call")![0]!;
+		const statuses: Array<string | undefined> = [];
+		const context = {
+			cwd,
+			mode: "tui",
+			ui: { setStatus(_key: string, text: string | undefined) { statuses.push(text); } },
+		};
+		const bypassStore = (pi.events as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as GuardBypassStore;
+
+		const command = `${JSON.stringify(executable)} --kubeconfig ${JSON.stringify(kubeconfig)} delete pod foo`;
+		const blocked = await toolCall({ toolName: "exec_command", input: { cmd: command } }, context) as {
+			block: boolean;
+			reason: string;
+		};
+		assert.equal(blocked.block, true);
+		assert.match(blocked.reason, /Approval request:/);
+
+		bypassStore.addRule("kubectl", cwd, { kind: "kubectl-kubeconfig", path: kubeconfig }, 10 * 60 * 1000);
+		assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: command } }, context), undefined);
+
+		const bash = tools.find((tool) => tool.name === "bash")!;
+		const result = await bash.execute("bypass-bash", { command }, undefined, undefined, context);
+		assert.equal(result.content[0].text.trim(), ["fake-kubectl", cwd, "--kubeconfig", kubeconfig, "delete", "pod", "foo"].join("\n"));
+
+		const otherDirectory = await toolCall(
+			{ toolName: "exec_command", input: { cmd: command } },
+			{ ...context, cwd: "/other" },
+		) as { block: boolean };
+		assert.equal(otherDirectory.block, true);
+		assert.ok(statuses.some((status) => status?.includes("kubectl")));
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("bash executes in the authorized cwd when the session directory changes", async () => {
+	const cwd = realpathSync(mkdtempSync(join(tmpdir(), "infra-guard-cwd-")));
+	try {
+		const { tools } = createHarness(createTestEventBus().facade());
+		const bash = tools.find((tool) => tool.name === "bash")!;
+		for (const directory of [cwd, realpathSync(process.cwd()), cwd]) {
+			const result = await bash.execute("cwd-test", { command: "pwd -P" }, undefined, undefined, { cwd: directory, mode: "tui" });
+			assert.equal(result.content[0].text.trim(), directory);
+		}
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("direct and nested tool paths reject compound interactive sessions even while paused", async () => {
+	const bus = createTestEventBus();
+	const broker = createPreflightBroker(bus.facade());
+	const { handlers, pi } = createHarness(bus.facade());
+	const preflight = await waitForPreflight(broker);
 	const toolCall = handlers.get("tool_call")![0]!;
-	const statuses: Array<string | undefined> = [];
-	const context = {
-		cwd: "/repo",
-		mode: "tui",
-		ui: { setStatus(_key: string, text: string | undefined) { statuses.push(text); } },
-	};
-	const bypassStore = (pi.events as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as {
-		addRule(
-			executable: "kubectl",
-			cwd: string,
-			scope: { kind: "kubectl-kubeconfig"; path: string },
-			durationMs: number,
-		): void;
-	};
-
-	const command = "kubectl --kubeconfig /tmp/kc delete pod foo";
-	const blocked = await toolCall({ toolName: "exec_command", input: { cmd: command } }, context) as {
-		block: boolean;
-		reason: string;
-	};
-	assert.equal(blocked.block, true);
-	assert.match(blocked.reason, /Approval request:/);
-
-	bypassStore.addRule("kubectl", "/repo", { kind: "kubectl-kubeconfig", path: "/tmp/kc" }, 10 * 60 * 1000);
-	assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: command } }, context), undefined);
-
-	const bash = tools.find((tool) => tool.name === "bash")!;
-	await assert.rejects(
-		bash.execute("bypass-bash", { command: "kubectl --kubeconfig /tmp/kc apply -f x.yaml" }, undefined, undefined, context),
-		/error: stat \/tmp\/kc/,
-		"bypassed bash command reaches kubectl itself",
-	);
-
-	const otherDirectory = await toolCall(
-		{ toolName: "exec_command", input: { cmd: command } },
-		{ ...context, cwd: "/other" },
-	) as { block: boolean };
-	assert.equal(otherDirectory.block, true);
-	assert.ok(statuses.some((status) => status?.includes("kubectl")));
+	const bypasses = (pi.events as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as GuardBypassStore;
+	bypasses.pause(10 * 60 * 1000);
+	for (const cmd of ["true; bash", "echo ready && exec /bin/sh", "(python3)"]) {
+		const direct = await toolCall({ toolName: "exec_command", input: { cmd, tty: true } }, { cwd: "/tmp", mode: "tui" });
+		const nested = await preflight({ ...nestedCall(cmd), input: { cmd, tty: true } });
+		for (const result of [direct, nested]) {
+			assert.ok(result && typeof result === "object" && "block" in result && "reason" in result, cmd);
+			assert.equal(result.block, true, cmd);
+			assert.equal(typeof result.reason, "string", cmd);
+			assert.match(result.reason as string, /interactive shell and interpreter sessions/, cmd);
+			assert.doesNotMatch(result.reason as string, /Approval request:/, cmd);
+		}
+	}
+	broker.shutdown();
 });
 
 test("bypass state does not leak across extension instances", async () => {
@@ -575,10 +609,11 @@ test("extension reloads guard toggles and command rules for each command", async
 		const toolCall = handlers.get("tool_call")![0]!;
 		const warnings: string[] = [];
 		const context = {
-			cwd: "/tmp",
+			cwd: directory,
 			mode: "tui",
 			ui: { notify(message: string) { warnings.push(message); } },
 		};
+		writeFileSync(join(directory, "README.md"), "kubectl test fixture\n");
 
 		writeFileSync(configPath, JSON.stringify({ guards: { rm: false } }));
 		assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: "rm disabled" } }, context), undefined);

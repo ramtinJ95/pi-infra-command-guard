@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { evaluateCommand } from "./policy.ts";
-import { parseSimpleCommands } from "./shell.ts";
+import { DEFAULT_COMMAND_POLICY_SETTINGS } from "./guarded-executables.ts";
+import { extractInvocation, parseSimpleCommands, recoverAstCommands } from "./shell.ts";
 import { test } from "./test-harness.ts";
 
 function deterministicRandom(seed: number): () => number {
@@ -119,4 +120,57 @@ test("unsupported shell constructs containing guarded commands fail closed", () 
 	];
 
 	for (const command of commands) assert.equal(evaluateCommand(command).allow, false, command);
+});
+
+test("empty quoted arguments and continuations preserve argv and raw provenance", () => {
+	for (const [command, words] of [
+		['kubectl --context "" delete pod api', ["kubectl", "--context", "", "delete", "pod", "api"]],
+		["kubectl --context '' get secrets", ["kubectl", "--context", "", "get", "secrets"]],
+		['printf ""#literal', ["printf", "#literal"]],
+		["r\\\nm target", ["rm", "target"]],
+		["kubectl \\\n delete pod api", ["kubectl", "delete", "pod", "api"]],
+		['kubectl --context "" \\\nget secrets', ["kubectl", "--context", "", "get", "secrets"]],
+		["printf 'a\\\nb'", ["printf", "a\\\nb"]],
+	] as const) {
+		const parsed = parseSimpleCommands(command);
+		assert.ok(!("error" in parsed), command);
+		assert.deepEqual(parsed.segments[0].words, words, command);
+		assert.deepEqual(recoverAstCommands(command).segments[0].words, words, command);
+	}
+	const continued = parseSimpleCommands("r\\\nm target");
+	assert.ok(!("error" in continued));
+	assert.equal(continued.segments[0].rawWords[0], "r\\\nm");
+	assert.ok("error" in parseSimpleCommands("echo >\\\n"));
+	assert.ok(!("error" in parseSimpleCommands('echo >""')));
+});
+
+test("continuations and empty values cannot hide known risks in either mode", () => {
+	for (const command of [
+		"r\\\nm target",
+		"ku\\\nbectl delete pod api",
+		"kubectl de\\\nlete pod api",
+		"git reset --ha\\\nrd HEAD",
+		'kubectl --context "" delete pod api',
+		'kubectl --context "" get secrets',
+		'kubectl --context "" get --raw /api/v1',
+	]) {
+		for (const guardUnclassifiedCommands of [true, false]) {
+			const decision = evaluateCommand(command, { ...DEFAULT_COMMAND_POLICY_SETTINGS, guardUnclassifiedCommands });
+			assert.equal(decision.allow, false, command);
+			assert.equal(decision.basis, "knownRisk", command);
+		}
+	}
+});
+
+test("command builtin execution and lookup share option semantics", () => {
+	for (const prefix of ["command -p", "command -p --", "builtin command -p", "command --"]) {
+		const command = `${prefix} kubectl delete pod api`;
+		assert.equal(evaluateCommand(command, { ...DEFAULT_COMMAND_POLICY_SETTINGS, guardUnclassifiedCommands: false }).allow, false, command);
+	}
+	for (const flag of ["-v", "-V", "-pv", "-p -V"]) {
+		const command = `command ${flag} rm`;
+		assert.equal(evaluateCommand(command).allow, true, command);
+	}
+	const afterTerminator = extractInvocation(["command", "--", "-p", "rm"]);
+	assert.equal(afterTerminator.executable, "-p");
 });

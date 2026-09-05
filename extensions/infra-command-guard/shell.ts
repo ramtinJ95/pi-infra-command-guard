@@ -34,6 +34,7 @@ type Invocation = {
 	args: string[];
 	words: string[];
 	wrappers: string[];
+	lookupOnly?: boolean;
 	error?: undefined;
 };
 type InvocationResult = Invocation | { error: string; executable?: undefined; args?: undefined; words?: undefined; wrappers?: undefined };
@@ -141,7 +142,7 @@ function isAssignmentWord(word: string): boolean {
 }
 
 function normalizeForInfraScan(text: string): string {
-	return String(text || "").replace(/["'\\]/g, "");
+	return String(text || "").replace(/\\\n/g, "").replace(/["'\\]/g, "");
 }
 
 function containsGuardedText(
@@ -233,7 +234,17 @@ function commandExecutesArguments(command: Command): boolean {
 	return invocation.executable === "find" && invocation.args.some((word) => ["-exec", "-execdir", "-ok", "-okdir"].includes(word));
 }
 
-function exactArgumentForwardingPrefix(value: unknown): string[] | undefined {
+function setReplacesArguments(args: readonly string[]): boolean {
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg === "-") continue;
+		if (!/^[+-][a-zA-Z]+$/.test(arg)) return true;
+		if (arg.includes("o")) index += 1; // set -o/+o consumes an option name, not a positional argument.
+	}
+	return false;
+}
+
+function exactArgumentForwardingPrefix(value: unknown, activeFunctions: ReadonlyMap<string, BashFunction>): string[] | undefined {
 	let prefix: string[] | undefined;
 	let ambiguous = false;
 	const visit = (node: unknown): void => {
@@ -241,21 +252,29 @@ function exactArgumentForwardingPrefix(value: unknown): string[] | undefined {
 		const record = node as Record<string, unknown>;
 		if (record.type === "Command") {
 			const command = node as Command;
-			const directName = command.name?.value;
-			if (directName === "shift" || (directName === "set" && command.suffix.some((word) => word.value === "--"))) {
+			const dispatch = staticShellBuiltinDispatch(command);
+			if (dispatch && (
+				["shift", "eval", "source", ".", "trap"].includes(dispatch.name) ||
+				(dispatch.name === "set" && setReplacesArguments(dispatch.args))
+			)) {
 				ambiguous = true;
 				return;
 			}
+			// Logging "$@" is not forwarding. Every command that can execute the
+			// arguments must agree on one exact, quote-preserving forwarding shape.
+			if (!functionExecutesArguments(command, activeFunctions)) return;
 			const words = command.name ? [command.name, ...command.suffix] : [];
-			const positionalIndex = words.findIndex((word) => ["$@", '"$@"', "${@}", '"${@}"'].includes(word.text));
-			if (positionalIndex !== -1) {
-				if (positionalIndex !== words.length - 1 || prefix) {
-					ambiguous = true;
-					return;
-				}
-				const candidate = words.slice(0, positionalIndex).map((word) => word.value);
-				prefix = candidate[0] === "exec" ? candidate.slice(1) : candidate;
+			const positionalIndex = words.findIndex((word) => ['"$@"', '"${@}"'].includes(word.text));
+			if (positionalIndex === -1 || positionalIndex !== words.length - 1 || prefix !== undefined) {
+				ambiguous = true;
+				return;
 			}
+			const candidate = words.slice(0, positionalIndex).map((word) => word.value);
+			if (candidate.some((word) => word.includes("$")) || activeFunctions.has(candidate[0])) {
+				ambiguous = true;
+				return;
+			}
+			prefix = candidate[0] === "exec" ? candidate.slice(1) : candidate;
 			return;
 		}
 		for (const child of Object.values(record)) visit(child);
@@ -328,15 +347,28 @@ function functionMutationEffect(
 	return effect;
 }
 
+function consumeBuiltinOptions(words: readonly string[], index: number, wrapper: string): { index: number; lookup: boolean } | { error: string } {
+	let lookup = false;
+	while (index < words.length) {
+		const word = words[index];
+		if (word === "--") return { index: index + 1, lookup };
+		if (!word.startsWith("-") || word === "-") break;
+		if (wrapper !== "command" || !/^-[pvV]+$/.test(word)) return { error: `Unsupported ${wrapper} option: ${word}` };
+		lookup ||= /[vV]/.test(word);
+		index += 1;
+	}
+	return { index, lookup };
+}
+
 function staticShellBuiltinDispatch(command: Command): { name: string; args: string[] } | undefined {
 	if (!command.name) return undefined;
 	const words = [command.name.value, ...command.suffix.map((word) => word.value)];
 	let index = 0;
 	while (words[index] === "builtin" || words[index] === "command") {
 		const wrapper = words[index];
-		index += 1;
-		while (words[index] === "--" || (wrapper === "command" && words[index] === "-p")) index += 1;
-		if (wrapper === "command" && (words[index] === "-v" || words[index] === "-V")) return undefined;
+		const consumed = consumeBuiltinOptions(words, index + 1, wrapper);
+		if ("error" in consumed || consumed.lookup) return undefined;
+		index = consumed.index;
 	}
 	const name = words[index];
 	return name ? { name, args: words.slice(index + 1) } : undefined;
@@ -384,7 +416,7 @@ function markDefinitelyShadowedCommands(
 		if (activeFunction && !name.includes("/")) {
 			shadowedCommands.add(node);
 			if (functionExecutesArguments(activeFunction.body, activeFunctions)) {
-				const forwardingPrefix = exactArgumentForwardingPrefix(activeFunction.body);
+				const forwardingPrefix = exactArgumentForwardingPrefix(activeFunction.body, activeFunctions);
 				if (forwardingPrefix) argumentForwardingCommands.set(node, forwardingPrefix);
 				else {
 					opaqueArgumentCommands.set(
@@ -499,6 +531,7 @@ function parseSimpleCommands(command: string): ParsedCommands {
 	let current = "";
 	let currentRaw = "";
 	let currentBare = "";
+	let wordStarted = false;
 	let inSingle = false;
 	let inDouble = false;
 	let escapeNext = false;
@@ -506,17 +539,19 @@ function parseSimpleCommands(command: string): ParsedCommands {
 	let inComment = false;
 
 	const add = (ch: string, quoted: boolean): void => {
+		wordStarted = true;
 		current += ch;
 		currentRaw += ch;
 		if (!quoted) currentBare += ch;
 	};
 
 	const pushWord = () => {
-		if (!current) {
+		if (!wordStarted) {
 			currentRaw = "";
 			currentBare = "";
 			return;
 		}
+		wordStarted = false;
 		if (skipNextWord) {
 			skipNextWord = false;
 			current = "";
@@ -600,24 +635,31 @@ function parseSimpleCommands(command: string): ParsedCommands {
 			continue;
 		}
 
-		if (ch === "#" && current.length === 0) {
+		if (ch === "#" && !wordStarted) {
 			inComment = true;
 			continue;
 		}
 
 		if (ch === "\\") {
 			currentRaw += ch;
+			if (next === "\n") {
+				currentRaw += next;
+				i += 1;
+				continue;
+			}
 			escapeNext = true;
 			continue;
 		}
 
 		if (ch === "'") {
+			wordStarted = true;
 			currentRaw += ch;
 			inSingle = true;
 			continue;
 		}
 
 		if (ch === '"') {
+			wordStarted = true;
 			currentRaw += ch;
 			inDouble = true;
 			continue;
@@ -658,6 +700,7 @@ function parseSimpleCommands(command: string): ParsedCommands {
 			if (next === "(") return { error: "Process substitution is not supported" };
 			if (ch === "<" && next === "<") return { error: "Heredoc syntax is not supported" };
 			if (/^\d+$/.test(current)) {
+				wordStarted = false;
 				current = "";
 				currentRaw = "";
 				currentBare = "";
@@ -684,7 +727,7 @@ function parseSimpleCommands(command: string): ParsedCommands {
 
 	if (escapeNext) return { error: "Trailing escape is not supported" };
 	if (inSingle || inDouble) return { error: "Unterminated quote" };
-	if (skipNextWord && !current) return { error: "Redirection without a target is not supported" };
+	if (skipNextWord && !wordStarted) return { error: "Redirection without a target is not supported" };
 
 	pushSegment();
 	return { segments };
@@ -811,8 +854,12 @@ function extractInvocation(words: string[]): InvocationResult {
 
 		if (executable === "command" || executable === "builtin") {
 			wrappers.push(executable);
-			index += 1;
-			while (index < words.length && words[index] === "--") index += 1;
+			const consumed = consumeBuiltinOptions(words, index + 1, executable);
+			if ("error" in consumed) return consumed;
+			if (consumed.lookup) {
+				return { executable, rawExecutable, args: words.slice(index + 1), words: words.slice(index), wrappers, lookupOnly: true };
+			}
+			index = consumed.index;
 			continue;
 		}
 
@@ -901,14 +948,16 @@ function collectPositionals(
 
 function isInteractiveInterpreterCommand(command: string): boolean {
 	const parsed = parseSimpleCommands(command);
-	if ("error" in parsed || parsed.segments.length !== 1) return false;
-	let invocation = extractInvocation(parsed.segments[0].words);
-	if ("error" in invocation || !invocation.executable) return false;
-	if (invocation.executable === "exec" && invocation.args.length > 0) {
-		invocation = extractInvocation(invocation.args);
+	const segments = requiresAstRecovery(parsed) ? recoverAstCommands(command).segments : parsed.segments ?? [];
+	return segments.some((segment) => {
+		let invocation = extractInvocation(segment.words);
 		if ("error" in invocation || !invocation.executable) return false;
-	}
-	return INTERACTIVE_INTERPRETERS.has(invocation.executable) || /^python(?:\d+(?:\.\d+)*)?$/.test(invocation.executable);
+		if (invocation.executable === "exec" && invocation.args.length > 0) {
+			invocation = extractInvocation(invocation.args);
+			if ("error" in invocation || !invocation.executable) return false;
+		}
+		return INTERACTIVE_INTERPRETERS.has(invocation.executable) || /^python(?:\d+(?:\.\d+)*)?$/.test(invocation.executable);
+	});
 }
 
 export {

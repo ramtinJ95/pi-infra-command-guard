@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reused parsed-invocation policy evaluation and provenance-preserving option normalization in scoped bypass checks instead of reconstructing shell commands.
+- Made Bash lifecycle tests independent of host-installed infrastructure tools and expanded deterministic detection regressions.
+
+### Fixed
+
+- Required genuine port-forward operations for the wrapped/backgrounded exception, retaining raw-control restrictions.
+- Preserved quoted secondary risks and literal versus expanded home paths in scoped bypasses.
+- Bound delegated Bash execution to the working directory used for authorization.
+- Detected interactive interpreter launches in compound TTY commands before pauses or one-time grants.
+- Preserved empty shell arguments and line continuations, unified command-builtin option handling, and tightened exact function argument-forwarding inference.
+- Respected Compose dry-run boolean values and repeated-option precedence.
+
 ## [0.9.1] - 2026-08-09
 
 ### Fixed

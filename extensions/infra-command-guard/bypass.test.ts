@@ -9,10 +9,60 @@ import {
 	isPathWithin,
 } from "./bypass.ts";
 import { DEFAULT_COMMAND_POLICY_SETTINGS } from "./guarded-executables.ts";
-import { executionIdentity } from "./approvals.ts";
+import { ApprovalStore, executionIdentity, guardExecution } from "./approvals.ts";
 import { test } from "./test-harness.ts";
 
 const SETTINGS = DEFAULT_COMMAND_POLICY_SETTINGS;
+
+test("a bypass never hides a second quoted or path-qualified risk", () => {
+	const bypasses = new GuardBypassStore();
+	bypasses.addRule("kubectl", "/repo", { kind: "command-prefix", tokens: ["delete", "pod", "foo"] }, 60_000);
+	for (const tail of ['"rm" /tmp/victim', "'/bin/rm' /tmp/victim", '"terraform" apply', '"kubectl" get --raw /api/v1']) {
+		const identity = executionIdentity("bash", { command: `kubectl delete pod foo; ${tail}` }, "/repo")!;
+		assert.equal(findMatchingBypassRule(identity, SETTINGS), undefined, tail);
+		assert.equal(guardExecution(new ApprovalStore(), identity, "tui", SETTINGS, bypasses).allow, false, tail);
+	}
+});
+
+test("a wrapped port-forward remains compatible with a separate scoped bypass", () => {
+	const bypasses = new GuardBypassStore();
+	bypasses.addRule("kubectl", "/repo", { kind: "command-prefix", tokens: ["delete", "pod", "foo"] }, 60_000);
+	const identity = executionIdentity("bash", {
+		command: 'kubectl delete pod foo; bash -lc "kubectl port-forward service/api 8080:80"',
+	}, "/repo")!;
+	assert.equal(guardExecution(new ApprovalStore(), identity, "tui", SETTINGS, bypasses).allow, true);
+	const explicitPortForwardRule = {
+		...SETTINGS,
+		commands: { ...SETTINGS.commands, kubectl: { allow: [], requireApproval: ["port-forward"] } },
+	};
+	assert.equal(guardExecution(new ApprovalStore(), identity, "tui", explicitPortForwardRule, bypasses).allow, false);
+});
+
+test("command-prefix bypasses distinguish literal and expanded home markers", () => {
+	const scopeFor = (argument: string) => findMatchingBypassRule(executionIdentity("bash", { command: `rm ${argument}` }, "/repo")!, SETTINGS)!.scope;
+	for (const [expanded, literals] of [
+		["~/target", ['"~/target"', "'~/target'", "\\~/target"]],
+		["$HOME/target", ["'$HOME/target'", "\\$HOME/target", '"\\$HOME/target"']],
+	] as const) {
+		const expandedScope = scopeFor(expanded);
+		assert.deepEqual(expandedScope, { kind: "command-prefix", tokens: [`${homedir()}/target`] });
+		for (const literal of literals) {
+			const bypasses = new GuardBypassStore();
+			bypasses.addRule("rm", "/repo", scopeFor(literal), 60_000);
+			assert.equal(bypasses.matches("rm", "/repo", expandedScope), false, literal);
+			assert.equal(bypasses.matches("rm", "/repo", scopeFor(literal)), true, literal);
+			const identity = executionIdentity("bash", { command: `rm ${expanded}` }, "/repo")!;
+			assert.equal(guardExecution(new ApprovalStore(), identity, "tui", SETTINGS, bypasses).allow, false, literal);
+		}
+	}
+	assert.deepEqual(scopeFor('"$HOME/target"'), scopeFor("~/target"));
+	assert.deepEqual(scopeFor('"a b"'), { kind: "command-prefix", tokens: ["a b"] });
+	assert.deepEqual(scopeFor('""'), { kind: "command-prefix", tokens: [""] });
+	const withGlobals = findMatchingBypassRule(
+		executionIdentity("bash", { command: 'terraform -chdir /tmp apply "$HOME/target"' }, "/repo")!, SETTINGS,
+	);
+	assert.deepEqual(withGlobals?.scope, { kind: "command-prefix", tokens: ["apply", `${homedir()}/target`] });
+});
 
 test("expandHomePath expands home-directory path forms", () => {
 	assert.equal(expandHomePath("~"), homedir());

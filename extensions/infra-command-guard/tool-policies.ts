@@ -1,4 +1,8 @@
-import { collectPositionals, normalizeForInfraScan, type Invocation } from "./shell.ts";
+import {
+	collectPositionals, containsGuardedText, extractInvocation, normalizeForInfraScan,
+	parseSimpleCommands, recoverAstCommands, requiresAstRecovery, segmentsHaveDynamicExecutable,
+	type Invocation,
+} from "./shell.ts";
 import { GUARDED_EXECUTABLES, type GuardedExecutable } from "./guarded-executables.ts";
 
 type ApprovalBasis = "knownRisk" | "unclassified" | "explicitRule";
@@ -628,8 +632,18 @@ function normalizeOverrideArguments(
 	args: string[],
 	keptValueOptions?: ReadonlySet<string>,
 ): string[] {
+	return normalizedOverrideArgumentIndices(executable, args, keptValueOptions).map((index) => args[index]);
+}
+
+// Keep indices so callers that retain quote provenance can use the same option
+// normalization without losing the correspondence between decoded and raw argv.
+function normalizedOverrideArgumentIndices(
+	executable: GuardedExecutable,
+	args: readonly string[],
+	keptValueOptions?: ReadonlySet<string>,
+): number[] {
 	const options = TOOL_GLOBAL_OPTIONS[executable];
-	const normalized: string[] = [];
+	const normalized: number[] = [];
 	for (let index = 0; index < args.length; index += 1) {
 		const word = args[index];
 		const name = optionName(word);
@@ -638,17 +652,17 @@ function normalizeOverrideArguments(
 				COMMAND_LIKE_GLOBAL_OPTIONS.has(name) ||
 				(executable === "docker" && name === "-v") ||
 				(executable === "vault" && name === "-help")
-			) normalized.push(word);
+			) normalized.push(index);
 			continue;
 		}
 		if (options.value.has(name)) {
 			if (keptValueOptions?.has(name)) {
 				if (word.includes("=")) {
-					normalized.push(word);
+					normalized.push(index);
 				} else {
 					const value = args[index + 1];
 					if (value === undefined) continue;
-					normalized.push(word, value);
+					normalized.push(index, index + 1);
 					index += 1;
 				}
 				continue;
@@ -659,7 +673,7 @@ function normalizeOverrideArguments(
 		if (hasAttachedOptionValue(word, options)) {
 			continue;
 		}
-		normalized.push(word);
+		normalized.push(index);
 	}
 	return normalized;
 }
@@ -696,14 +710,56 @@ function hasRawKubectlFlag(words: string[]): boolean {
 	return words.some((word) => word === "--raw" || word.startsWith("--raw="));
 }
 
+const PORT_FORWARD_XARGS_OPTIONS: ToolGlobalOptions = {
+	boolean: new Set(["-0", "-r", "-t", "-p", "-x", "--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit"]),
+	value: new Set(["-a", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file", "--eof", "--replace", "--max-lines", "--max-args", "--max-procs", "--max-chars"]),
+	attachedValue: new Set(["-a", "-E", "-I", "-L", "-n", "-P", "-s"]),
+};
+
 function isKubectlPortForwardOnlyCommand(command: string): boolean {
 	const normalized = normalizeForInfraScan(command).toLowerCase();
-	const kubectlMentions = normalized.match(/\bkubectl\b(?=[\s;|&()<>]|$)/g) || [];
-	if (kubectlMentions.length === 0) return false;
+	if (!normalized.includes("port-forward") || !containsGuardedText(command, ["kubectl"])) return false;
 	if (OTHER_GUARDED_EXECUTABLE_PATTERN.test(normalized)) return false;
-	const kubectlPortForwardMentions =
-		normalized.match(/\bkubectl\b(?=[\s;|&()<>]|$)(?:(?!&&|\|\||[;&|\n]).)*\bport-forward\b/g) || [];
-	return kubectlPortForwardMentions.length === kubectlMentions.length;
+	const parsed = parseSimpleCommands(command);
+	const recovered = requiresAstRecovery(parsed) ? recoverAstCommands(command) : undefined;
+	if (recovered?.errors.length) return false;
+	const segments = recovered?.segments ?? parsed.segments ?? [];
+	if (segmentsHaveDynamicExecutable(segments)) return false;
+	let found = false;
+	for (const segment of segments) {
+		if (segment.shadowedExecutable || segment.opaqueArgumentText) return false;
+		let invocation = extractInvocation(segment.words);
+		if ("error" in invocation) return false;
+		if (invocation.executable === "xargs") {
+			const delegated = parseLeadingCommand(invocation.args, PORT_FORWARD_XARGS_OPTIONS);
+			if ("error" in delegated || !delegated.command) return false;
+			invocation = extractInvocation([delegated.command, ...delegated.tail]);
+			if ("error" in invocation) return false;
+		}
+		if (invocation.executable === "kubectl") {
+			const collected = collectPositionals(invocation.args, {
+				maxPositionals: 1,
+				leadingBooleanOptions: KUBECTL_LEADING_BOOLEAN_OPTIONS,
+				leadingValueOptions: KUBECTL_LEADING_VALUE_OPTIONS,
+			});
+			if ("error" in collected || collected.positionals[0] !== "port-forward" || !evaluateKubectl(invocation).allow) return false;
+			found = true;
+			continue;
+		}
+		// Preserve the documented shell-wrapped exception, but inspect the actual
+		// -c script instead of treating any argument named port-forward as authority.
+		if (["sh", "bash", "zsh", "dash", "fish"].includes(invocation.executable ?? "")) {
+			let codeIndex = 0;
+			while (/^-[a-zA-Z]+$/.test(invocation.args[codeIndex] ?? "") && !invocation.args[codeIndex].includes("c")) codeIndex += 1;
+			if (!/^-[a-zA-Z]*c[a-zA-Z]*$/.test(invocation.args[codeIndex] ?? "") || !invocation.args[codeIndex + 1]) return false;
+			if (invocation.args.slice(codeIndex + 2).some((arg) => containsGuardedText(arg))) return false;
+			if (!isKubectlPortForwardOnlyCommand(invocation.args[codeIndex + 1])) return false;
+			found = true;
+			continue;
+		}
+		if (containsGuardedText(segment.words.join(" "), ["kubectl"])) return false;
+	}
+	return found;
 }
 
 function knownRisk(reason: string): ApprovalDecision {
@@ -1016,6 +1072,17 @@ function hasEnabledBooleanOption(args: readonly string[], name: string): boolean
 	});
 }
 
+function effectiveBooleanOption(args: readonly string[], name: string): boolean {
+	// A safety exemption requires an enabled final value, not merely the flag's
+	// presence. Docker's boolean flags use the last occurrence.
+	for (let index = args.length - 1; index >= 0; index -= 1) {
+		const word = args[index];
+		if (word === name) return true;
+		if (word.startsWith(`${name}=`)) return /^(?:1|true|t)$/i.test(word.slice(name.length + 1));
+	}
+	return false;
+}
+
 function isDockerHostRootVolume(value: string): boolean {
 	return /^(?:\/|[A-Za-z]:[\\/]):/.test(value);
 }
@@ -1083,7 +1150,7 @@ function dockerComposeApprovalDecision(args: readonly string[]): {
 		return { decision: unclassified(`docker compose uses an unsupported flag layout (${parsed.error})`) };
 	}
 	const action = (parsed.command || "").toLowerCase();
-	const dryRun = parsed.leading.some((word) => optionName(word) === "--dry-run");
+	const dryRun = effectiveBooleanOption(parsed.leading, "--dry-run");
 	if (!action || action === "help" || parsed.leading.some((word) => optionName(word) === "--help")) return { action, dryRun };
 	if (action === "exec" || action === "run") {
 		return { action, dryRun, decision: knownRisk(`docker compose ${action} runs an arbitrary command in a container`) };
@@ -1779,6 +1846,7 @@ export {
 	evaluateAlwaysDestructive,
 	evaluateNonBypassableRisk,
 	normalizeOverrideArguments,
+	normalizedOverrideArgumentIndices,
 	rsyncExecutableOptionValues,
 };
 export type { AllowDecision, ApprovalBasis, ApprovalDecision, PolicyDecision, ToolEvaluator };
