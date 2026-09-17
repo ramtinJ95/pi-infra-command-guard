@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-17
+
 ### Added
 
 - Added an experimental, opt-in TypeSafe review (`integrations.typesafe`, default off) that asks TypeSafe's System One model whether the deterministic guard reason describes a blocked command. Reviews run only for blocks based on a positively recognized risk, render as a separately labelled advisory in the approval overlay, and never change a block or grant approval. Both the command and the guard reason are credential-redacted on complete shell words with a shell-safe placeholder before they leave the machine; a command whose quoting cannot be resolved is reported as `Not sent` instead of being guessed at. Strings supplied by TypeSafe are sanitized and bounded before display, a cancelled approval tool call stops waiting without notifying or opening the overlay, and direct JSON changes to the setting discard in-flight and cached reviews when next observed.
@@ -139,7 +141,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial infrastructure command guard with structured approval flow and CI packaging checks.
 
-[Unreleased]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/ramtinJ95/pi-infra-command-guard/compare/v0.8.1...v0.9.0
