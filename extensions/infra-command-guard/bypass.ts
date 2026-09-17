@@ -63,6 +63,8 @@ function formatDuration(durationMs: number): string {
 	const option = DURATION_OPTIONS.find((candidate) => candidate.value === durationMs);
 	if (option) return option.label;
 	const minutes = Math.max(1, Math.round(durationMs / 60000));
+	const rounded = DURATION_OPTIONS.find((candidate) => candidate.value === minutes * 60000);
+	if (rounded) return rounded.label;
 	return `${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
@@ -81,23 +83,61 @@ function isPathWithin(candidate: string, directory: string): boolean {
 	return candidate === directory || candidate.startsWith(directory.endsWith(sep) ? directory : directory + sep);
 }
 
-class GuardBypassStore {
-	private pauseExpiresAt: number | undefined;
-	private readonly rules: BypassRule[] = [];
+// A single expiring pause. Shared by the guard-wide pause and the TypeSafe
+// review pause so both use the same duration options and expiry semantics.
+class TimedPause {
+	private expiresAt: number | undefined;
 
 	constructor(private readonly now: () => number = Date.now) {}
 
 	pause(durationMs: number): void {
-		this.pauseExpiresAt = this.now() + durationMs;
+		this.expiresAt = this.now() + durationMs;
 	}
 
 	resume(): void {
-		this.pauseExpiresAt = undefined;
+		this.expiresAt = undefined;
 	}
 
 	isPaused(): boolean {
-		this.prune();
-		return this.pauseExpiresAt !== undefined;
+		return this.remainingMs() !== undefined;
+	}
+
+	remainingMs(): number | undefined {
+		if (this.expiresAt !== undefined && this.expiresAt <= this.now()) this.expiresAt = undefined;
+		return this.expiresAt === undefined ? undefined : this.expiresAt - this.now();
+	}
+}
+
+function parseDurationArgument(value: string): number | undefined {
+	const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+	if (!normalized) return undefined;
+	const labelled = DURATION_OPTIONS.find((option) => option.label === normalized);
+	if (labelled) return labelled.value;
+	const short = normalized.match(/^(\d+)\s*(m|min|mins|minutes?|h|hr|hours?)$/);
+	if (!short) return undefined;
+	const amount = Number(short[1]);
+	const minutes = short[2].startsWith("h") ? amount * 60 : amount;
+	return DURATION_OPTIONS.find((option) => option.value === minutes * 60_000)?.value;
+}
+
+class GuardBypassStore {
+	private readonly pauseState: TimedPause;
+	private readonly rules: BypassRule[] = [];
+
+	constructor(private readonly now: () => number = Date.now) {
+		this.pauseState = new TimedPause(now);
+	}
+
+	pause(durationMs: number): void {
+		this.pauseState.pause(durationMs);
+	}
+
+	resume(): void {
+		this.pauseState.resume();
+	}
+
+	isPaused(): boolean {
+		return this.pauseState.isPaused();
 	}
 
 	addRule(executable: GuardedExecutable, cwd: string, scope: BypassScope, durationMs: number): BypassRule {
@@ -130,7 +170,7 @@ class GuardBypassStore {
 	}
 
 	clear(): void {
-		this.pauseExpiresAt = undefined;
+		this.pauseState.resume();
 		this.rules.length = 0;
 	}
 
@@ -147,8 +187,9 @@ class GuardBypassStore {
 	describe(): string[] {
 		this.prune();
 		const lines: string[] = [];
-		if (this.pauseExpiresAt !== undefined) {
-			lines.push(`Guard paused for ${formatDuration(this.pauseExpiresAt - this.now())}`);
+		const pauseRemaining = this.pauseState.remainingMs();
+		if (pauseRemaining !== undefined) {
+			lines.push(`Guard paused for ${formatDuration(pauseRemaining)}`);
 		}
 		for (const rule of this.rules) {
 			lines.push(this.describeRule(rule));
@@ -162,7 +203,6 @@ class GuardBypassStore {
 
 	private prune(): void {
 		const now = this.now();
-		if (this.pauseExpiresAt !== undefined && this.pauseExpiresAt <= now) this.pauseExpiresAt = undefined;
 		for (let index = this.rules.length - 1; index >= 0; index -= 1) {
 			if (this.rules[index].expiresAt <= now) this.rules.splice(index, 1);
 		}
@@ -412,11 +452,13 @@ export {
 	TEN_MINUTES_MS,
 	THIRTY_MINUTES_MS,
 	GuardBypassStore,
+	TimedPause,
 	describeBypassScope,
 	expandHomePath,
 	findMatchingBypassRule,
 	formatDuration,
 	isPathWithin,
+	parseDurationArgument,
 	sameBypassScope,
 };
 export type { BypassRule, BypassScope, MatchingInvocation };

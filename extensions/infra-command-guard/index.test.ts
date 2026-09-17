@@ -8,6 +8,7 @@ import "./approvals.test.ts";
 import "./approval-ui.test.ts";
 import "./bypass.test.ts";
 import "./code-mode.test.ts";
+import "./typesafe.test.ts";
 import "./extension.test.ts";
 import { runTests } from "./test-harness.ts";
 

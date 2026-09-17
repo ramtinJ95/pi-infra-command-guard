@@ -1,5 +1,10 @@
 import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TUI } from "@earendil-works/pi-tui";
+import { sanitizeExternalText, type AdvisoryNote } from "./typesafe.ts";
+
+// Advisory text can carry strings from a remote service; keep it printable and
+// bounded even if the caller already sanitized it.
+const MAX_ADVISORY_LINE_LENGTH = 1_000;
 
 type ApprovalDetails = {
 	summary: string;
@@ -44,6 +49,7 @@ class InfraApprovalOverlay {
 		private command: string,
 		private bypass: BypassOffer | undefined,
 		private done: (choice: ApprovalChoice) => void,
+		private advisory: AdvisoryNote | undefined = undefined,
 	) {}
 
 	private choiceCount(): number {
@@ -192,6 +198,16 @@ class InfraApprovalOverlay {
 		lines.push(this.theme.fg("accent", this.theme.bold("Guard reason")));
 		lines.push(...wrapBlock(this.reason, width).map((line) => this.theme.fg("warning", line)));
 		lines.push("");
+		if (this.advisory) {
+			// Advisory judgments render in their own labelled section so they are
+			// never mistaken for the deterministic guard reason above.
+			lines.push(this.theme.fg("muted", this.theme.bold(sanitizeExternalText(this.advisory.heading, MAX_ADVISORY_LINE_LENGTH))));
+			for (const item of this.advisory.lines) {
+				const text = sanitizeExternalText(item.text, MAX_ADVISORY_LINE_LENGTH);
+				lines.push(...wrapBlock(text, width).map((line) => this.theme.fg(item.style, line)));
+			}
+			lines.push("");
+		}
 		lines.push(this.theme.fg("accent", this.theme.bold("What it does")));
 		lines.push(...wrapBlock(this.approvalDetails.summary, width).map((line) => this.theme.fg("text", line)));
 		lines.push("");
@@ -245,10 +261,11 @@ async function requestInfraApproval(
 	reason: string,
 	command: string,
 	bypass?: BypassOffer,
+	advisory?: AdvisoryNote,
 ): Promise<ApprovalChoice> {
 	const choice = await ctx.ui.custom<ApprovalChoice>(
 		(tui: TUI, theme: Theme, keybindings: KeybindingsManager, done: (choice: ApprovalChoice) => void) =>
-			new InfraApprovalOverlay(tui, theme, keybindings, approvalDetails, reason, command, bypass, done),
+			new InfraApprovalOverlay(tui, theme, keybindings, approvalDetails, reason, command, bypass, done, advisory),
 		{
 			overlay: true,
 			overlayOptions: {

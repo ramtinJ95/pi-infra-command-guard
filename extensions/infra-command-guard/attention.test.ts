@@ -31,7 +31,7 @@ test("approval attention config is silent by default and resolves sound paths fr
 	assert.deepEqual(parseApprovalAttentionSettings({}, configPath), {
 		notifications: { enabled: false, backend: "auto" },
 		sound: { enabled: false, path: null },
-		integrations: { herdr: { enabled: true } },
+		integrations: { herdr: { enabled: true }, typesafe: { enabled: false, timeoutMs: 8000 } },
 	});
 	assert.deepEqual(
 		parseApprovalAttentionSettings(
@@ -46,9 +46,16 @@ test("approval attention config is silent by default and resolves sound paths fr
 		{
 			notifications: { enabled: true, backend: "terminal" },
 			sound: { enabled: true, path: "/home/test/.pi/agent/sounds/approval.wav" },
-			integrations: { herdr: { enabled: false } },
+			integrations: { herdr: { enabled: false }, typesafe: { enabled: false, timeoutMs: 8000 } },
 		},
 	);
+	assert.deepEqual(
+		parseApprovalAttentionSettings({ integrations: { typesafe: { enabled: true, timeoutMs: 2500 } } }, configPath).integrations.typesafe,
+		{ enabled: true, timeoutMs: 2500 },
+	);
+	assert.throws(() => parseApprovalAttentionSettings({ integrations: { typesafe: { enabled: "yes" } } }, configPath), /typesafe.enabled must be true or false/);
+	assert.throws(() => parseApprovalAttentionSettings({ integrations: { typesafe: { timeoutMs: 500 } } }, configPath), /timeoutMs must be an integer between 1000 and 30000/);
+	assert.throws(() => parseApprovalAttentionSettings({ integrations: { typesafe: { apiKey: "x" } } }, configPath), /typesafe contains unknown field: apiKey/);
 	assert.throws(() => parseApprovalAttentionSettings({ notifications: { enabled: "yes" } }, configPath), /must be true or false/);
 	assert.throws(() => parseApprovalAttentionSettings({ guardUnclassifiedCommands: "no" }, configPath), /must be true or false/);
 	assert.throws(() => parseApprovalAttentionSettings({ notifications: { provider: "kitty" } }, configPath), /unknown field/);
@@ -57,7 +64,7 @@ test("approval attention config is silent by default and resolves sound paths fr
 	assert.deepEqual(loadApprovalAttentionSettings("/definitely/missing/infra-command-guard.json").settings, {
 		notifications: { enabled: false, backend: "auto" },
 		sound: { enabled: false, path: null },
-		integrations: { herdr: { enabled: true } },
+		integrations: { herdr: { enabled: true }, typesafe: { enabled: false, timeoutMs: 8000 } },
 	});
 });
 

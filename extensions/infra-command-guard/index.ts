@@ -7,6 +7,8 @@ import {
 	ApprovalStore,
 	executionIdentity,
 	guardExecution,
+	type GuardDecision,
+	type PendingApproval,
 } from "./approvals.ts";
 import {
 	DURATION_OPTIONS,
@@ -14,10 +16,24 @@ import {
 	describeBypassScope,
 	findMatchingBypassRule,
 	formatDuration,
+	parseDurationArgument,
 	sameBypassScope,
 } from "./bypass.ts";
 import { requestInfraApproval } from "./approval-ui.ts";
-import { loadPolicySettings, requestApprovalAttention } from "./attention.ts";
+import { loadGuardConfiguration, requestApprovalAttention } from "./attention.ts";
+import {
+	DEFAULT_TYPESAFE_SETTINGS,
+	TYPESAFE_API_KEY_ENV,
+	TYPESAFE_STORE_KEY,
+	TypeSafeReviewStore,
+	hasTypeSafeCredentials,
+	persistTypeSafeEnabled,
+	reviewAdvisory,
+	skippedReviewAdvisory,
+	type AdvisoryNote,
+	type ReviewTransport,
+	type TypeSafeSettings,
+} from "./typesafe.ts";
 import {
 	registerCodeModeToolPreflight,
 	type CodeModeToolPreflight,
@@ -30,6 +46,35 @@ import {
 
 const CODE_MODE_PUBLIC_TOOL_NAMES = new Set(["exec", "wait", "functions.exec", "functions.wait"]);
 const BYPASS_OFFER_FLAG = { flag: "Scoped bypass option", meaning: "bypass flag" };
+const TYPESAFE_COMMAND = "infra-guard-typesafe";
+const TYPESAFE_COMMAND_ACTIONS = ["status", "enable", "pause", "resume", "disable"] as const;
+const TYPESAFE_USAGE = `Usage: /${TYPESAFE_COMMAND} [${TYPESAFE_COMMAND_ACTIONS.join("|")}] — pause accepts ${DURATION_OPTIONS.map((option) => option.label).join(", ")}`;
+
+type ExtensionDependencies = {
+	// Injected by tests; production uses the global fetch and Pi's environment.
+	typeSafeTransport?: ReviewTransport;
+};
+
+// Resolves with the promise's value, or with undefined as soon as `signal`
+// aborts. The underlying promise is left to settle on its own.
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T | undefined> {
+	if (!signal) return promise;
+	if (signal.aborted) return Promise.resolve(undefined);
+	return new Promise<T | undefined>((resolve, reject) => {
+		const onAbort = () => resolve(undefined);
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(error: unknown) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+	});
+}
 
 const ApproveInfraCommandParams = Type.Object({
 	request_id: Type.String({ description: "The approval request identifier from the blocked tool result." }),
@@ -46,18 +91,25 @@ const ApproveInfraCommandParams = Type.Object({
 	blastRadius: Type.String({ description: "Concrete blast radius: what changes, what data is exposed, and worst-case impact." }),
 });
 
-export default function createExtension(pi: ExtensionAPI) {
+export default function createExtension(pi: ExtensionAPI, dependencies: ExtensionDependencies = {}) {
 	const bashTool = createBashTool(process.cwd());
 	const approvals = new ApprovalStore();
 	const bypasses = new GuardBypassStore();
+	const typeSafeReviews = new TypeSafeReviewStore();
+	const typeSafeTransport: ReviewTransport = dependencies.typeSafeTransport ?? {
+		fetch: (input, init) => globalThis.fetch(input, init),
+		env: process.env,
+	};
 	const events = pi.events as unknown as Record<PropertyKey, unknown>;
 	events[APPROVAL_STORE_KEY] = approvals;
 	events[BYPASS_STORE_KEY] = bypasses;
+	events[TYPESAFE_STORE_KEY] = typeSafeReviews;
 	const currentApprovals = (): ApprovalStore => events[APPROVAL_STORE_KEY] as ApprovalStore;
 	const currentBypasses = (): GuardBypassStore => events[BYPASS_STORE_KEY] as GuardBypassStore;
+	const currentTypeSafe = (): TypeSafeReviewStore => events[TYPESAFE_STORE_KEY] as TypeSafeReviewStore;
 	let lastBypassState: string[] = [];
 	const syncBypassStatus = (context?: { ui?: ExtensionContext["ui"] }): void => {
-		const lines = currentBypasses().describe();
+		const lines = [...currentBypasses().describe(), ...currentTypeSafe().describe()];
 		const changed =
 			lines.length !== lastBypassState.length ||
 			lines.some((line, index) => line !== lastBypassState[index]);
@@ -69,16 +121,37 @@ export default function createExtension(pi: ExtensionAPI) {
 	};
 	let lastConfigWarning: string | undefined;
 	let lastGuardRevision: string | undefined;
+	let lastTypeSafeRevision: string | undefined;
+	// The TypeSafe toggle is read from the same file in the same pass as the
+	// policy settings, so no extra file read is added to the per-command path.
+	// Configuration is not watched: a direct JSON edit is observed the next time
+	// this runs (the next shell command, approval request, or slash command).
+	let currentTypeSafeSettings: TypeSafeSettings = DEFAULT_TYPESAFE_SETTINGS;
+	let currentConfigState: { configPath: string; error?: string | undefined } = { configPath: "" };
 	const currentPolicySettings = (context?: { ui?: ExtensionContext["ui"] }): CommandPolicySettings => {
-		const loaded = loadPolicySettings();
-		const revision = `${loaded.error ? `invalid:${loaded.error}:` : "valid:"}${JSON.stringify(loaded.settings)}`;
+		const loaded = loadGuardConfiguration();
+		currentTypeSafeSettings = loaded.typesafe;
+		currentConfigState = { configPath: loaded.configPath, error: loaded.error };
+		const revision = `${loaded.error ? `invalid:${loaded.error}:` : "valid:"}${JSON.stringify(loaded.policy)}`;
 		if (lastGuardRevision !== undefined && revision !== lastGuardRevision) {
 			currentApprovals().clear();
 		}
 		lastGuardRevision = revision;
+		// Any observed change to the TypeSafe settings (including the file becoming
+		// invalid) aborts in-flight reviews and forgets cached ones, so a review
+		// started under the previous settings is never shown or reused later. A
+		// disabling change also ends the session pause, as `disable` does.
+		const typeSafeRevision = `${loaded.error ? "invalid" : "valid"}:${JSON.stringify(loaded.typesafe)}`;
+		if (lastTypeSafeRevision !== undefined && typeSafeRevision !== lastTypeSafeRevision) {
+			const store = currentTypeSafe();
+			store.clear();
+			if (!loaded.typesafe.enabled) store.pause.resume();
+			syncBypassStatus(context);
+		}
+		lastTypeSafeRevision = typeSafeRevision;
 		if (!loaded.error) {
 			lastConfigWarning = undefined;
-			return loaded.settings;
+			return loaded.policy;
 		}
 		const warning = `infra-command-guard could not read ${loaded.configPath}: ${loaded.error}. All command guards remain enabled with built-in policies.`;
 		if (warning !== lastConfigWarning) {
@@ -89,7 +162,77 @@ export default function createExtension(pi: ExtensionAPI) {
 				}
 			} catch {}
 		}
-		return loaded.settings;
+		return loaded.policy;
+	};
+	const typeSafeActive = (): boolean => currentTypeSafeSettings.enabled && !currentTypeSafe().pause.isPaused();
+	let lastTypeSafeWarning: string | undefined;
+	const warnTypeSafe = (context: { ui?: ExtensionContext["ui"] } | undefined, warning: string): void => {
+		if (warning === lastTypeSafeWarning) return;
+		try {
+			if (context?.ui?.notify) {
+				context.ui.notify(warning, "warning");
+				lastTypeSafeWarning = warning;
+			}
+		} catch {}
+	};
+	// Starts the advisory review for a fresh TUI block whose basis is a positively
+	// recognized risk. Allowed commands, unclassified blocks, custom-rule blocks,
+	// non-TUI blocks, and retries of approved commands never reach this point.
+	const beginTypeSafeReview = (
+		guarded: GuardDecision,
+		command: string,
+		context: { ui?: ExtensionContext["ui"] } | undefined,
+	): void => {
+		if (guarded.allow || !guarded.requestId || guarded.basis !== "knownRisk" || guarded.policyReason === undefined) return;
+		if (!typeSafeActive()) return;
+		if (!hasTypeSafeCredentials(typeSafeTransport.env)) {
+			warnTypeSafe(
+				context,
+				`infra-command-guard TypeSafe review is enabled but ${TYPESAFE_API_KEY_ENV} is not set; blocks still require normal approval. Set the variable and restart Pi, or run /${TYPESAFE_COMMAND} disable.`,
+			);
+		}
+		currentTypeSafe().begin(command, guarded.policyReason, currentTypeSafeSettings, typeSafeTransport);
+	};
+	// Resolves the advisory for the approval overlay. Returns nothing when the
+	// review is disabled or paused now, including a pause or configuration change
+	// that happened while the review was in flight. Stops waiting as soon as the
+	// approval tool call is aborted; the review itself stays cached for a retry.
+	const typeSafeAdvisory = async (
+		pending: PendingApproval,
+		context: { ui?: ExtensionContext["ui"] } | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<AdvisoryNote | undefined> => {
+		if (!typeSafeActive()) return undefined;
+		if (pending.basis !== "knownRisk") return skippedReviewAdvisory("not-known-risk");
+		const record = currentTypeSafe().lookup(pending.identity.command, pending.reason);
+		if (!record) return skippedReviewAdvisory("not-requested");
+		const outcome = await untilAborted(record.outcome, signal);
+		if (outcome === undefined) return undefined;
+		// Re-read the file: it may have been disabled while we waited.
+		currentPolicySettings(context);
+		if (!typeSafeActive()) return undefined;
+		if (outcome.status === "failed" || outcome.status === "timed-out" || outcome.status === "not-sent") {
+			warnTypeSafe(
+				context,
+				`infra-command-guard TypeSafe review ${
+					outcome.status === "failed"
+						? `failed: ${outcome.detail}`
+						: outcome.status === "not-sent"
+							? `was not sent: ${outcome.detail}`
+							: `timed out after ${outcome.timeoutMs} ms`
+				}. The normal approval flow is unaffected.`,
+			);
+		}
+		return reviewAdvisory(record, outcome);
+	};
+	const describeTypeSafeState = (): string => {
+		if (currentConfigState.error) return `TypeSafe review: unavailable (configuration invalid: ${currentConfigState.error})`;
+		if (!currentTypeSafeSettings.enabled) return "TypeSafe review: disabled (integrations.typesafe.enabled is false or omitted)";
+		const remaining = currentTypeSafe().pause.remainingMs();
+		const credentials = hasTypeSafeCredentials(typeSafeTransport.env) ? "" : ` — ${TYPESAFE_API_KEY_ENV} is not set`;
+		return remaining === undefined
+			? `TypeSafe review: enabled (advisory only, ${currentTypeSafeSettings.timeoutMs} ms timeout)${credentials}`
+			: `TypeSafe review: enabled, paused for ${formatDuration(remaining)}${credentials}`;
 	};
 	const codeModeGuard: CodeModeToolPreflight = (call) => {
 		if (call.toolName !== "exec_command") return undefined;
@@ -115,6 +258,7 @@ export default function createExtension(pi: ExtensionAPI) {
 			policySettings,
 			currentBypasses(),
 		);
+		beginTypeSafeReview(guarded, identity.command, nestedContext);
 		return guarded.allow ? undefined : { block: true, reason: guarded.reason };
 	};
 	const codeModeRegistration = registerCodeModeToolPreflight(pi, codeModeGuard);
@@ -200,6 +344,140 @@ export default function createExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand(TYPESAFE_COMMAND, {
+		description: "Manage the experimental TypeSafe review of known-risk blocks: status, enable, pause, resume, disable",
+		getArgumentCompletions: (prefix) => {
+			const items = TYPESAFE_COMMAND_ACTIONS.filter((action) => action.startsWith(prefix.trim().toLowerCase()))
+				.map((action) => ({ value: action, label: action }));
+			return items.length > 0 ? items : null;
+		},
+		handler: async (args, ctx) => {
+			currentPolicySettings(ctx);
+			const store = currentTypeSafe();
+			const [rawAction = "", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+			const action = rawAction.toLowerCase();
+			const interactive = ctx.hasUI && ctx.mode === "tui";
+			const persist = (enabled: boolean): boolean => {
+				if (currentConfigState.error) {
+					ctx.ui.notify(
+						`infra-command-guard cannot change TypeSafe settings while ${currentConfigState.configPath} is invalid: ${currentConfigState.error}`,
+						"error",
+					);
+					return false;
+				}
+				const written = persistTypeSafeEnabled(currentConfigState.configPath, enabled);
+				if (!written.ok) {
+					ctx.ui.notify(`infra-command-guard could not update ${currentConfigState.configPath}: ${written.error}`, "error");
+					return false;
+				}
+				currentPolicySettings(ctx);
+				return true;
+			};
+			const enable = (): void => {
+				if (!persist(true)) return;
+				store.pause.resume();
+				syncBypassStatus(ctx);
+				ctx.ui.notify(
+					hasTypeSafeCredentials(typeSafeTransport.env)
+						? `TypeSafe review enabled and saved to ${currentConfigState.configPath}. Known-risk blocks now include an advisory reason check; approval is unchanged.`
+						: `TypeSafe review enabled and saved to ${currentConfigState.configPath}, but ${TYPESAFE_API_KEY_ENV} is not set. Reviews will report missing credentials until Pi is restarted with the variable set.`,
+					hasTypeSafeCredentials(typeSafeTransport.env) ? "info" : "warning",
+				);
+			};
+			const disable = (): void => {
+				if (!persist(false)) return;
+				store.clear();
+				store.pause.resume();
+				syncBypassStatus(ctx);
+				ctx.ui.notify(`TypeSafe review disabled and saved to ${currentConfigState.configPath}. No TypeSafe requests will be made.`, "info");
+			};
+			const pause = (durationMs: number): void => {
+				store.pause.pause(durationMs);
+				store.clear();
+				syncBypassStatus(ctx);
+				ctx.ui.notify(`TypeSafe review paused for ${formatDuration(durationMs)} in this session; the guard itself is unchanged.`, "info");
+			};
+			const resume = (): void => {
+				store.pause.resume();
+				syncBypassStatus(ctx);
+				ctx.ui.notify("TypeSafe review resumed.", "info");
+			};
+			const selectDuration = async (): Promise<number | undefined> => {
+				const duration = await ctx.ui.select(
+					"Pause TypeSafe review for…",
+					DURATION_OPTIONS.map((option) => option.label),
+				);
+				return DURATION_OPTIONS.find((candidate) => candidate.label === duration)?.value;
+			};
+
+			if ((action === "" && !interactive) || action === "status") {
+				ctx.ui.notify(`infra-command-guard — ${describeTypeSafeState()}`, "info");
+				return;
+			}
+			if (action === "enable") {
+				enable();
+				return;
+			}
+			if (action === "disable") {
+				disable();
+				return;
+			}
+			if (action === "resume") {
+				resume();
+				return;
+			}
+			if (action === "pause") {
+				if (!currentTypeSafeSettings.enabled) {
+					ctx.ui.notify(`TypeSafe review is already disabled in configuration; run /${TYPESAFE_COMMAND} enable first.`, "info");
+					return;
+				}
+				const durationArgument = rest.join(" ");
+				let durationMs = durationArgument ? parseDurationArgument(durationArgument) : undefined;
+				if (durationArgument && durationMs === undefined) {
+					ctx.ui.notify(`Unknown pause duration "${durationArgument}". ${TYPESAFE_USAGE}`, "warning");
+					return;
+				}
+				if (durationMs === undefined) {
+					if (!interactive) {
+						ctx.ui.notify(TYPESAFE_USAGE, "warning");
+						return;
+					}
+					durationMs = await selectDuration();
+					if (durationMs === undefined) return;
+				}
+				pause(durationMs);
+				return;
+			}
+			if (action !== "") {
+				ctx.ui.notify(TYPESAFE_USAGE, "warning");
+				return;
+			}
+
+			const enableOption = "Enable TypeSafe review (saves to configuration)";
+			const disableOption = "Disable TypeSafe review (saves to configuration)";
+			const pauseOption = "Pause TypeSafe review…";
+			const resumeOption = "Resume TypeSafe review now";
+			const options = currentConfigState.error
+				? []
+				: !currentTypeSafeSettings.enabled
+					? [enableOption]
+					: [store.pause.isPaused() ? resumeOption : pauseOption, disableOption];
+			if (options.length === 0) {
+				ctx.ui.notify(`infra-command-guard — ${describeTypeSafeState()}`, "error");
+				return;
+			}
+			const choice = await ctx.ui.select(describeTypeSafeState(), options);
+			if (!choice) return;
+			if (choice === enableOption) enable();
+			else if (choice === disableOption) disable();
+			else if (choice === resumeOption) resume();
+			else if (choice === pauseOption) {
+				const durationMs = await selectDuration();
+				if (durationMs !== undefined) pause(durationMs);
+			}
+		},
+	});
+
 	pi.registerTool({
 		name: "approve_infra_command",
 		label: "Approve Infra Command",
@@ -213,7 +491,7 @@ export default function createExtension(pi: ExtensionAPI) {
 			"When using approve_infra_command, keep summary, flags, and blastRadius non-overlapping; the approval UI renders command and reason separately.",
 		],
 		parameters: ApproveInfraCommandParams,
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			currentPolicySettings(ctx);
 			const approvalStore = currentApprovals();
 			const validation = approvalStore.validate(params.request_id, params.command, params.reason);
@@ -223,6 +501,13 @@ export default function createExtension(pi: ExtensionAPI) {
 					details: { approved: false, requestId: params.request_id, reason: params.reason, command: params.command },
 				};
 			}
+			// A cancelled tool call must never notify the user or open the overlay.
+			// The pending request stays valid so a fresh call can still ask.
+			const cancelled = () => ({
+				content: [{ type: "text" as const, text: "Approval request cancelled before the user was asked. Do not retry the command." }],
+				details: { approved: false, requestId: validation.pending.id, reason: params.reason, command: params.command },
+			});
+			if (signal?.aborted) return cancelled();
 
 			if (ctx.mode !== "tui") {
 				return {
@@ -260,6 +545,11 @@ export default function createExtension(pi: ExtensionAPI) {
 				}
 				: { summary: params.summary, flags: params.flags, blastRadius: params.blastRadius };
 
+			// Bounded by the review's own timeout and by this call's abort signal;
+			// failures surface in the overlay and never delay or replace the normal
+			// approval decision.
+			const advisory = await typeSafeAdvisory(validation.pending, ctx, signal);
+			if (signal?.aborted) return cancelled();
 			await requestApprovalAttention(ctx);
 			const approvalChoice = await requestInfraApproval(
 				ctx,
@@ -310,6 +600,7 @@ export default function createExtension(pi: ExtensionAPI) {
 						},
 					}
 					: undefined,
+				advisory,
 			);
 			if (approvalChoice === "cancel") {
 				approvalStore.cancel(validation.pending.id);
@@ -370,6 +661,7 @@ export default function createExtension(pi: ExtensionAPI) {
 			policySettings,
 			currentBypasses(),
 		);
+		beginTypeSafeReview(guarded, identity.command, ctx);
 		return guarded.allow ? undefined : { block: true, reason: guarded.reason };
 	});
 
@@ -389,13 +681,16 @@ export default function createExtension(pi: ExtensionAPI) {
 				policySettings,
 				currentBypasses(),
 			);
+			beginTypeSafeReview(guarded, identity.command, ctx);
 			if (!guarded.allow) throw new Error(guarded.reason);
 			return delegatedTool.execute(toolCallId, params, signal, onUpdate);
 		},
 	});
 
 	pi.on("session_shutdown", () => {
+		typeSafeReviews.clear();
 		if (events[APPROVAL_STORE_KEY] === approvals) delete events[APPROVAL_STORE_KEY];
 		if (events[BYPASS_STORE_KEY] === bypasses) delete events[BYPASS_STORE_KEY];
+		if (events[TYPESAFE_STORE_KEY] === typeSafeReviews) delete events[TYPESAFE_STORE_KEY];
 	});
 }

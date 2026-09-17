@@ -6,7 +6,7 @@ import {
 	type CommandPolicySettings,
 	type GuardedExecutable,
 } from "./guarded-executables.ts";
-import { evaluateCommand, isInteractiveInterpreterCommand } from "./policy.ts";
+import { evaluateCommand, isInteractiveInterpreterCommand, type PolicyDecision } from "./policy.ts";
 import { findMatchingBypassRule, type BypassScope } from "./bypass.ts";
 
 const APPROVAL_STORE_KEY = Symbol.for("infra-command-guard.approval-store.v1");
@@ -24,10 +24,13 @@ interface ExecutionIdentity {
 	login?: boolean | undefined;
 }
 
+type ApprovalBasis = NonNullable<PolicyDecision["basis"]>;
+
 interface PendingApproval {
 	id: string;
 	identity: ExecutionIdentity;
 	reason: string;
+	basis: ApprovalBasis;
 	createdAt: number;
 }
 
@@ -37,9 +40,19 @@ type GuardBypassResult = {
 	cwd: string;
 };
 
+// `policyReason` and `basis` expose the deterministic classification behind a
+// block so callers can gate optional advisory work (for example the TypeSafe
+// review) on a known-risk basis without re-parsing the formatted reason.
 type GuardDecision =
 	| { allow: true }
-	| { allow: false; reason: string; requestId?: string | undefined; bypassInfo?: GuardBypassResult | undefined };
+	| {
+		allow: false;
+		reason: string;
+		requestId?: string | undefined;
+		bypassInfo?: GuardBypassResult | undefined;
+		policyReason?: string | undefined;
+		basis?: ApprovalBasis | undefined;
+	};
 
 function executionFingerprint(identity: ExecutionIdentity): string {
 	return JSON.stringify([
@@ -82,12 +95,13 @@ class ApprovalStore {
 		private readonly createId: () => string = randomUUID,
 	) {}
 
-	createPending(identity: ExecutionIdentity, reason: string): PendingApproval {
+	createPending(identity: ExecutionIdentity, reason: string, basis: ApprovalBasis = "knownRisk"): PendingApproval {
 		this.prune();
 		const pending = {
 			id: this.createId(),
 			identity: { ...identity },
 			reason,
+			basis,
 			createdAt: this.now(),
 		};
 		this.pending.set(pending.id, pending);
@@ -215,13 +229,17 @@ function guardExecution(
 				"",
 				"Approval is unavailable outside TUI mode. Do not retry the command.",
 			].join("\n"),
+			policyReason: decision.reason,
+			basis: decision.basis,
 		};
 	}
-	const pending = store.createPending(identity, decision.reason);
+	const pending = store.createPending(identity, decision.reason, decision.basis);
 	return {
 		allow: false,
 		requestId: pending.id,
 		reason: formatApprovalRequest(decision.reason, identity.command, pending.id),
+		policyReason: decision.reason,
+		basis: decision.basis,
 		...(bypassMatch
 			? {
 					bypassInfo: {
@@ -242,4 +260,4 @@ export {
 	ApprovalStore,
 	guardExecution,
 };
-export type { ExecutionIdentity, GuardBypassResult, GuardDecision, GuardSource };
+export type { ApprovalBasis, ExecutionIdentity, GuardBypassResult, GuardDecision, GuardSource, PendingApproval };

@@ -44,6 +44,7 @@
     "extensions/infra-command-guard/policy.ts",
     "extensions/infra-command-guard/shell.ts",
     "extensions/infra-command-guard/tool-policies.ts",
+    "extensions/infra-command-guard/typesafe.ts",
     "AGENTS.md",
     "infra-command-guard.schema.json",
     "README.md",
