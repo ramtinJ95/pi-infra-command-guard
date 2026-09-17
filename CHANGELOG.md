@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added an experimental, opt-in TypeSafe review (`integrations.typesafe`, default off) that asks TypeSafe's System One model whether the deterministic guard reason describes a blocked command. Reviews run only for blocks based on a positively recognized risk, render as a separately labelled advisory in the approval overlay, and never change a block or grant approval.
+- Added `/infra-guard-typesafe` with `status`, `enable`, `pause [duration]`, `resume`, and `disable`. Enable and disable persist to `infra-command-guard.json`; pauses reuse the guard's session-scoped 10 minute, 30 minute, and 1 hour durations and appear in the status line.
+
+### Changed
+
+- Guard decisions now expose the classification basis and raw policy reason so optional advisory work can be gated without re-parsing formatted block text.
+- Pause durations that round to a documented option are described with that option's label (for example `1 hour` instead of `60 minutes`).
+
 ## [0.9.2] - 2026-09-05
 
 ### Changed

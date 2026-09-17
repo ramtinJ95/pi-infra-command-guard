@@ -123,6 +123,25 @@
               "description": "Use native delivery for auto and Herdr's broker for explicit terminal delivery when running inside a Herdr pane."
             }
           }
+        },
+        "typesafe": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Experimental. After a block based on a positively recognized risk, ask TypeSafe (System One, model jev-latest) whether the guard reason describes the blocked command. Advisory only: it never changes a block or grants approval. Requires TYPESAFE_API_KEY in Pi's environment.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Send known-risk blocks to TypeSafe for an advisory reason check. Disabled by default; no requests are made while false."
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 30000,
+              "default": 8000,
+              "description": "Per-request timeout. Timed-out reviews are reported in the approval overlay and never delay the block."
+            }
+          }
         }
       }
     }

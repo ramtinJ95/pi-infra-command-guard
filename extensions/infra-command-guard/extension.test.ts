@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,6 +15,14 @@ import {
 } from "./code-mode.ts";
 import createExtension from "./index.ts";
 import { test } from "./test-harness.ts";
+import {
+	REVIEW_VERDICTS,
+	TYPESAFE_MODEL,
+	TYPESAFE_STORE_KEY,
+	type ReviewTransport,
+	type ReviewVerdict,
+	type TypeSafeReviewStore,
+} from "./typesafe.ts";
 
 const ALL_GUARDS_DISABLED = {
 	argocd: false,
@@ -62,7 +70,7 @@ function createTestEventBus() {
 
 type EventFacade = ReturnType<ReturnType<typeof createTestEventBus>["facade"]>;
 
-function createHarness(events: EventFacade) {
+function createHarness(events: EventFacade, dependencies?: Parameters<typeof createExtension>[1]) {
 	const handlers = new Map<string, Array<(event: any, context: any) => unknown>>();
 	const tools: any[] = [];
 	const commands = new Map<string, { handler(args: string, context: any): unknown }>();
@@ -76,8 +84,106 @@ function createHarness(events: EventFacade) {
 			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
 		},
 	};
-	createExtension(pi as never);
+	createExtension(pi as never, dependencies);
 	return { commands, handlers, pi, tools };
+}
+
+type RecordedTypeSafeCall = { url: string; init: RequestInit; body: any };
+
+function judgedTypeSafeBody(verdict: ReviewVerdict, confidence = 0.8): unknown {
+	const rest = (1 - confidence) / (REVIEW_VERDICTS.length - 1);
+	return {
+		model: TYPESAFE_MODEL,
+		answers: {
+			reason_match: {
+				type: "choice",
+				choice: verdict,
+				confidence,
+				probabilities: Object.fromEntries(REVIEW_VERDICTS.map((candidate) => [candidate, candidate === verdict ? confidence : rest])),
+			},
+		},
+		usage: { input_tokens: 1, output_tokens: 1 },
+	};
+}
+
+function createTypeSafeTransport(
+	respond: (call: RecordedTypeSafeCall, signal: AbortSignal | null | undefined) => Promise<Response> | Response,
+	env: NodeJS.ProcessEnv = { TYPESAFE_API_KEY: "test-key" },
+): ReviewTransport & { calls: RecordedTypeSafeCall[] } {
+	const calls: RecordedTypeSafeCall[] = [];
+	return {
+		calls,
+		env,
+		fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+			const call = { url: String(input), init: init ?? {}, body: init?.body ? JSON.parse(String(init.body)) : undefined };
+			calls.push(call);
+			return respond(call, init?.signal);
+		}) as typeof fetch,
+	};
+}
+
+function jsonTypeSafeResponse(body: unknown, status = 200): Response {
+	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+function withAgentDir<T>(prefix: string, run: (directory: string, configPath: string) => Promise<T>): Promise<T> {
+	const directory = mkdtempSync(join(tmpdir(), prefix));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = directory;
+	return run(directory, join(directory, "infra-command-guard.json")).finally(() => {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(directory, { recursive: true, force: true });
+	});
+}
+
+// Drives a blocked command through the approval tool, capturing the rendered
+// overlay so tests can assert what the user actually sees.
+async function approveBlocked(
+	harness: ReturnType<typeof createHarness>,
+	cmd: string,
+	key: "y" | "n",
+	options: { cwd?: string; notifications?: string[]; statuses?: Array<string | undefined> } = {},
+) {
+	const cwd = options.cwd ?? "/tmp";
+	const context = {
+		cwd,
+		mode: "tui",
+		ui: {
+			notify(message: string) { options.notifications?.push(message); },
+			setStatus(_key: string, value: string | undefined) { options.statuses?.push(value); },
+		},
+	};
+	const toolCall = harness.handlers.get("tool_call")![0]!;
+	const blocked = await toolCall({ toolName: "exec_command", input: { cmd } }, context) as { block: boolean; reason: string } | undefined;
+	assert.ok(blocked?.block, `expected ${cmd} to be blocked`);
+	const requestId = blocked.reason.match(/Approval request: ([^\n]+)/)?.[1];
+	const reason = blocked.reason.match(/^BLOCKED — ([^\n]+)/)?.[1];
+	assert.ok(requestId && reason, blocked.reason);
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text };
+	let rendered = "";
+	const approve = harness.tools.find((tool) => tool.name === "approve_infra_command")!;
+	const result = await approve.execute(
+		"approve",
+		{ request_id: requestId, command: cmd, reason, summary: "summary", flags: [], blastRadius: "blast radius" },
+		new AbortController().signal,
+		undefined,
+		{
+			...context,
+			ui: {
+				...context.ui,
+				async custom(factory: (...args: any[]) => { render(width: number): string[]; handleInput(data: string): void }) {
+					let choice = "cancel";
+					const overlay = factory({ requestRender() {}, terminal: { rows: 80 } }, theme, { matches: () => false }, (selected: string) => { choice = selected; });
+					rendered = overlay.render(160).join("\n").replace(/[│╭╮╰╯─]/g, " ").replace(/\s+/g, " ");
+					overlay.handleInput(key);
+					return choice;
+				},
+				async select() { return undefined; },
+			},
+		},
+	);
+	return { result, rendered, reason, requestId, context };
 }
 
 function createPreflightBroker(events: EventFacade) {
@@ -731,4 +837,366 @@ test("Code Mode reloads guard toggles and command rules without losing preflight
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 		rmSync(directory, { recursive: true, force: true });
 	}
+});
+
+test("TypeSafe review is off by default: no credentials, no requests, unchanged approvals", async () => {
+	await withAgentDir("infra-command-guard-typesafe-off-", async () => {
+		const transport = createTypeSafeTransport(() => jsonTypeSafeResponse(judgedTypeSafeBody("mismatched")), {});
+		const harness = createHarness(createTestEventBus().facade(), { typeSafeTransport: transport });
+		const notifications: string[] = [];
+		const approved = await approveBlocked(harness, "rm default-off-target", "y", { notifications });
+		assert.equal(approved.result.details.approved, true);
+		assert.doesNotMatch(approved.rendered, /TypeSafe/);
+		assert.equal(transport.calls.length, 0);
+		assert.equal(notifications.length, 0);
+		const approvals = (harness.pi.events as Record<PropertyKey, unknown>)[APPROVAL_STORE_KEY] as ApprovalStore;
+		assert.equal(approvals.consume(executionIdentity("exec-command", { cmd: "rm default-off-target" }, "/tmp")!), true);
+		assert.equal(transport.calls.length, 0);
+		const store = (harness.pi.events as Record<PropertyKey, unknown>)[TYPESAFE_STORE_KEY] as TypeSafeReviewStore;
+		assert.equal(store.size(), 0);
+		await harness.commands.get("infra-guard-typesafe")!.handler("status", {
+			hasUI: false,
+			mode: "rpc",
+			ui: { notify(message: string) { notifications.push(message); } },
+		});
+		assert.match(notifications.at(-1) ?? "", /TypeSafe review: disabled/);
+	});
+});
+
+test("TypeSafe review consults only known-risk blocks and renders every verdict as advisory", async () => {
+	await withAgentDir("infra-command-guard-typesafe-gate-", async (_directory, configPath) => {
+		writeFileSync(configPath, JSON.stringify({ integrations: { typesafe: { enabled: true } } }));
+		let nextVerdict: ReviewVerdict = "supported";
+		const transport = createTypeSafeTransport(() => jsonTypeSafeResponse(judgedTypeSafeBody(nextVerdict, 0.7)));
+		const harness = createHarness(createTestEventBus().facade(), { typeSafeTransport: transport });
+		const toolCall = harness.handlers.get("tool_call")![0]!;
+		const context = { cwd: "/tmp", mode: "tui", ui: { notify() {}, setStatus() {} } };
+
+		const expectations: Record<ReviewVerdict, RegExp> = {
+			supported: /Verdict: Supported — the reason identifies an executable operation or effect/,
+			partially_supported: /Verdict: Partially supported/,
+			mismatched: /Verdict: Mismatched — the reason may not describe this command; the deterministic block still stands/,
+			insufficient_evidence: /Verdict: Insufficient evidence/,
+		};
+		let expectedCalls = 0;
+		for (const verdict of REVIEW_VERDICTS) {
+			nextVerdict = verdict;
+			const cmd = `rm known-risk-${verdict}`;
+			const approved = await approveBlocked(harness, cmd, "y");
+			expectedCalls += 1;
+			assert.equal(transport.calls.length, expectedCalls, cmd);
+			const call = transport.calls.at(-1)!;
+			assert.equal(call.url, "https://api.typesafe.ai/v1/systemone");
+			assert.equal(call.init.method, "POST");
+			assert.equal((call.init.headers as Record<string, string>).Authorization, "Bearer test-key");
+			assert.equal(call.body.model, TYPESAFE_MODEL);
+			assert.equal(call.body.state.command, cmd);
+			assert.equal(call.body.state.guard_reason, approved.reason);
+			assert.deepEqual(Object.keys(call.body.questions.reason_match.criteria), [...REVIEW_VERDICTS]);
+			assert.match(approved.rendered, /Guard reason .* TypeSafe review — experimental, advisory only/);
+			assert.match(approved.rendered, expectations[verdict]);
+			assert.match(approved.rendered, /Distribution: supported 0\.\d\d · partially supported 0\.\d\d · mismatched 0\.\d\d · insufficient evidence 0\.\d\d/);
+			assert.match(approved.rendered, /Confidence 0\.70 measures how concentrated that distribution is, not whether the verdict is correct/);
+			assert.match(approved.rendered, /does not change the block or grant approval/);
+			assert.equal(approved.result.details.approved, true, "approval is still the human's decision");
+			// The approved retry consumes the grant without a further request.
+			assert.equal(await toolCall({ toolName: "exec_command", input: { cmd } }, context), undefined);
+			assert.equal(transport.calls.length, expectedCalls);
+		}
+
+		// Re-blocking the identical command reuses the cached review.
+		const reblocked = await toolCall({ toolName: "exec_command", input: { cmd: "rm known-risk-supported" } }, context) as { block: boolean };
+		assert.equal(reblocked.block, true);
+		assert.equal(transport.calls.length, expectedCalls);
+
+		// Allowed commands never reach TypeSafe.
+		assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: "git status" } }, context), undefined);
+		assert.equal(transport.calls.length, expectedCalls);
+
+		// Unclassified blocks are not reviewed and say so.
+		const unclassified = await approveBlocked(harness, "$TOOL unclassified-target", "y");
+		assert.match(unclassified.reason, /shell variable/);
+		assert.equal(transport.calls.length, expectedCalls);
+		assert.match(unclassified.rendered, /Not consulted: TypeSafe reviews only blocks based on a positively recognized risk/);
+		assert.equal(unclassified.result.details.approved, true);
+
+		// Custom requireApproval rules are not reviewed either.
+		writeFileSync(configPath, JSON.stringify({
+			integrations: { typesafe: { enabled: true } },
+			commands: { git: { requireApproval: ["status"] } },
+		}));
+		const customRule = await approveBlocked(harness, "git status", "y");
+		assert.match(customRule.reason, /Custom command rule requires approval/);
+		assert.equal(transport.calls.length, expectedCalls);
+		assert.match(customRule.rendered, /Not consulted/);
+
+		// Non-TUI blocks have no approval overlay and make no request.
+		const rpc = await toolCall({ toolName: "exec_command", input: { cmd: "rm rpc-target" } }, { cwd: "/tmp", mode: "rpc" }) as { block: boolean };
+		assert.equal(rpc.block, true);
+		assert.equal(transport.calls.length, expectedCalls);
+
+		// A mismatched verdict never approves anything: cancel still cancels.
+		nextVerdict = "mismatched";
+		const cancelled = await approveBlocked(harness, "rm cancelled-target", "n");
+		assert.equal(transport.calls.length, expectedCalls + 1);
+		assert.match(cancelled.rendered, /Verdict: Mismatched/);
+		assert.equal(cancelled.result.details.approved, false);
+		const approvals = (harness.pi.events as Record<PropertyKey, unknown>)[APPROVAL_STORE_KEY] as ApprovalStore;
+		assert.equal(approvals.consume(executionIdentity("exec-command", { cmd: "rm cancelled-target" }, "/tmp")!), false);
+		const stillBlocked = await toolCall({ toolName: "exec_command", input: { cmd: "rm cancelled-target" } }, context) as { block: boolean };
+		assert.equal(stillBlocked.block, true);
+	});
+});
+
+test("TypeSafe review covers bash and Code Mode block paths with a single request each", async () => {
+	await withAgentDir("infra-command-guard-typesafe-paths-", async (_directory, configPath) => {
+		writeFileSync(configPath, JSON.stringify({ integrations: { typesafe: { enabled: true } } }));
+		const transport = createTypeSafeTransport(() => jsonTypeSafeResponse(judgedTypeSafeBody("supported")));
+		const bus = createTestEventBus();
+		const broker = createPreflightBroker(bus.facade());
+		const harness = createHarness(bus.facade(), { typeSafeTransport: transport });
+		const preflight = await waitForPreflight(broker);
+		const nested = await preflight(nestedCall("rm code-mode-target"));
+		assert.equal(nested?.block, true);
+		assert.equal(transport.calls.length, 1);
+		assert.equal(transport.calls[0]!.body.state.command, "rm code-mode-target");
+
+		const bash = harness.tools.find((tool) => tool.name === "bash")!;
+		await assert.rejects(
+			bash.execute("bash-block", { command: "rm bash-target" }, undefined, undefined, { cwd: "/tmp", mode: "tui", ui: { setStatus() {}, notify() {} } }),
+			/Approval request:/,
+		);
+		assert.equal(transport.calls.length, 2);
+		assert.equal(transport.calls[1]!.body.state.command, "rm bash-target");
+		await assert.rejects(
+			bash.execute("bash-block", { command: "rm bash-target" }, undefined, undefined, { cwd: "/tmp", mode: "tui", ui: { setStatus() {}, notify() {} } }),
+			/Approval request:/,
+		);
+		assert.equal(transport.calls.length, 2, "re-blocking the same bash command reuses the review");
+		broker.shutdown();
+	});
+});
+
+test("TypeSafe failures stay visible in the overlay and leave the approval flow intact", async () => {
+	await withAgentDir("infra-command-guard-typesafe-failures-", async (_directory, configPath) => {
+		writeFileSync(configPath, JSON.stringify({ integrations: { typesafe: { enabled: true } } }));
+
+		const unauthorized = createTypeSafeTransport(() => jsonTypeSafeResponse({ detail: "Invalid API key" }, 401));
+		const unauthorizedHarness = createHarness(createTestEventBus().facade(), { typeSafeTransport: unauthorized });
+		const notifications: string[] = [];
+		const failed = await approveBlocked(unauthorizedHarness, "rm unauthorized-target", "y", { notifications });
+		assert.match(failed.rendered, /Not available: TypeSafe request failed \(HTTP 401 \(check TYPESAFE_API_KEY\): Invalid API key\)/);
+		assert.equal(failed.result.details.approved, true);
+		assert.equal(unauthorized.calls.length, 1);
+
+		const malformed = createTypeSafeTransport(() => jsonTypeSafeResponse({ answers: { reason_match: { type: "choice", choice: "safe", confidence: 1, probabilities: {} } } }));
+		const malformedHarness = createHarness(createTestEventBus().facade(), { typeSafeTransport: malformed });
+		const shape = await approveBlocked(malformedHarness, "rm malformed-target", "y");
+		assert.match(shape.rendered, /Not available: TypeSafe request failed \(response choice is not a known verdict: safe\)/);
+		assert.equal(shape.result.details.approved, true);
+
+		const network = createTypeSafeTransport(() => Promise.reject(new Error("ECONNRESET")));
+		const networkHarness = createHarness(createTestEventBus().facade(), { typeSafeTransport: network });
+		const offline = await approveBlocked(networkHarness, "rm offline-target", "n");
+		assert.match(offline.rendered, /Not available: TypeSafe request failed \(ECONNRESET\)/);
+		assert.equal(offline.result.details.approved, false);
+
+		const missing = createTypeSafeTransport(() => jsonTypeSafeResponse(judgedTypeSafeBody("supported")), {});
+		const missingHarness = createHarness(createTestEventBus().facade(), { typeSafeTransport: missing });
+		const missingNotifications: string[] = [];
+		const noKey = await approveBlocked(missingHarness, "rm missing-key-target", "y", { notifications: missingNotifications });
+		assert.equal(missing.calls.length, 0, "no request is attempted without credentials");
+		assert.match(noKey.rendered, /Not available: TYPESAFE_API_KEY is not set in Pi's environment/);
+		assert.equal(noKey.result.details.approved, true);
+		assert.equal(missingNotifications.filter((message) => /TYPESAFE_API_KEY is not set/.test(message)).length, 1);
+		await approveBlocked(missingHarness, "rm missing-key-again", "y", { notifications: missingNotifications });
+		assert.equal(missingNotifications.filter((message) => /TYPESAFE_API_KEY is not set/.test(message)).length, 1, "the credential warning is not repeated");
+	});
+});
+
+test("/infra-guard-typesafe enables, pauses, resumes, and disables the review independently of the guard", async () => {
+	await withAgentDir("infra-command-guard-typesafe-command-", async (_directory, configPath) => {
+		writeFileSync(configPath, JSON.stringify({ guards: { az: false }, notifications: { enabled: false } }));
+		const transport = createTypeSafeTransport(() => jsonTypeSafeResponse(judgedTypeSafeBody("supported")));
+		const harness = createHarness(createTestEventBus().facade(), { typeSafeTransport: transport });
+		const command = harness.commands.get("infra-guard-typesafe")!;
+		const toolCall = harness.handlers.get("tool_call")![0]!;
+		const store = (harness.pi.events as Record<PropertyKey, unknown>)[TYPESAFE_STORE_KEY] as TypeSafeReviewStore;
+		const bypasses = (harness.pi.events as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as GuardBypassStore;
+		const notifications: string[] = [];
+		const statuses: Array<string | undefined> = [];
+		const context = {
+			cwd: "/tmp",
+			mode: "tui",
+			ui: {
+				notify(message: string) { notifications.push(message); },
+				setStatus(_key: string, value: string | undefined) { statuses.push(value); },
+			},
+		};
+		const run = (args: string, selections: string[] = [], inspect?: (title: string, options: string[]) => void) => {
+			let index = 0;
+			return command.handler(args, {
+				hasUI: true,
+				mode: "tui",
+				ui: {
+					...context.ui,
+					async select(title: string, options: string[]) {
+						inspect?.(title, options);
+						return selections[index++];
+					},
+				},
+			});
+		};
+		const readConfig = () => JSON.parse(readFileSync(configPath, "utf8"));
+
+		await run("status");
+		assert.match(notifications.at(-1)!, /TypeSafe review: disabled/);
+		await run("pause 1h");
+		assert.match(notifications.at(-1)!, /already disabled in configuration/);
+		await run("", [], (_title, options) => assert.deepEqual(options, ["Enable TypeSafe review (saves to configuration)"]));
+
+		await run("enable");
+		assert.deepEqual(readConfig(), {
+			guards: { az: false },
+			notifications: { enabled: false },
+			integrations: { typesafe: { enabled: true } },
+		});
+		assert.match(notifications.at(-1)!, /TypeSafe review enabled and saved/);
+		assert.match(notifications.at(-1)!, /approval is unchanged/);
+		await run("status");
+		assert.match(notifications.at(-1)!, /TypeSafe review: enabled \(advisory only, 8000 ms timeout\)/);
+
+		const enabledBlock = await toolCall({ toolName: "exec_command", input: { cmd: "rm enabled-target" } }, context) as { block: boolean };
+		assert.equal(enabledBlock.block, true);
+		assert.equal(transport.calls.length, 1);
+
+		await run("pause 1 hour");
+		assert.equal(store.pause.isPaused(), true);
+		assert.equal(bypasses.isPaused(), false, "pausing the review never pauses the guard");
+		assert.match(notifications.at(-1)!, /TypeSafe review paused for 1 hour in this session; the guard itself is unchanged/);
+		assert.match(statuses.at(-1) ?? "", /TypeSafe review paused for 1 hour/);
+		const pausedBlock = await toolCall({ toolName: "exec_command", input: { cmd: "rm paused-target" } }, context) as { block: boolean };
+		assert.equal(pausedBlock.block, true, "the guard still blocks while the review is paused");
+		assert.equal(transport.calls.length, 1, "no request while paused");
+		const pausedOverlay = await approveBlocked(harness, "rm paused-overlay-target", "y");
+		assert.doesNotMatch(pausedOverlay.rendered, /TypeSafe/);
+		assert.equal(transport.calls.length, 1);
+		await run("status");
+		assert.match(notifications.at(-1)!, /TypeSafe review: enabled, paused for 1 hour/);
+		assert.equal(readConfig().integrations.typesafe.enabled, true, "a pause is never persisted");
+
+		await run("resume");
+		assert.equal(store.pause.isPaused(), false);
+		assert.equal(statuses.at(-1), undefined);
+		await toolCall({ toolName: "exec_command", input: { cmd: "rm resumed-target" } }, context);
+		assert.equal(transport.calls.length, 2);
+
+		await run("pause nonsense");
+		assert.match(notifications.at(-1)!, /Unknown pause duration "nonsense"/);
+		assert.equal(store.pause.isPaused(), false);
+		await run("frobnicate");
+		assert.match(notifications.at(-1)!, /^Usage: \/infra-guard-typesafe/);
+
+		await run("", ["Pause TypeSafe review…", "10 minutes"], (_title, options) => {
+			if (options.includes("Pause TypeSafe review…")) {
+				assert.deepEqual(options, ["Pause TypeSafe review…", "Disable TypeSafe review (saves to configuration)"]);
+			}
+		});
+		assert.equal(store.pause.isPaused(), true);
+		await run("", ["Resume TypeSafe review now"], (title, options) => {
+			assert.match(title, /paused for 10 minutes/);
+			assert.deepEqual(options, ["Resume TypeSafe review now", "Disable TypeSafe review (saves to configuration)"]);
+		});
+		assert.equal(store.pause.isPaused(), false);
+
+		await run("", ["Disable TypeSafe review (saves to configuration)"]);
+		assert.equal(readConfig().integrations.typesafe.enabled, false);
+		assert.deepEqual(readConfig().guards, { az: false });
+		assert.match(notifications.at(-1)!, /TypeSafe review disabled and saved/);
+		assert.equal(store.size(), 0);
+		await toolCall({ toolName: "exec_command", input: { cmd: "rm disabled-target" } }, context);
+		assert.equal(transport.calls.length, 2, "no request after disabling");
+
+		writeFileSync(configPath, "{ broken");
+		await run("enable");
+		assert.match(notifications.at(-1)!, /cannot change TypeSafe settings while .* is invalid/);
+		assert.equal(readFileSync(configPath, "utf8"), "{ broken");
+		await run("", [], () => assert.fail("no menu for an invalid configuration"));
+		assert.match(notifications.at(-1)!, /configuration invalid/);
+	});
+});
+
+test("pausing or disabling TypeSafe mid-flight discards the pending review", async () => {
+	await withAgentDir("infra-command-guard-typesafe-inflight-", async (_directory, configPath) => {
+		writeFileSync(configPath, JSON.stringify({ integrations: { typesafe: { enabled: true } } }));
+		let release: ((response: Response) => void) | undefined;
+		let aborted = 0;
+		const transport = createTypeSafeTransport((_call, signal) => new Promise<Response>((resolve, reject) => {
+			release = resolve;
+			signal?.addEventListener("abort", () => {
+				aborted += 1;
+				reject(new Error("aborted"));
+			});
+		}));
+		const harness = createHarness(createTestEventBus().facade(), { typeSafeTransport: transport });
+		const toolCall = harness.handlers.get("tool_call")![0]!;
+		const store = (harness.pi.events as Record<PropertyKey, unknown>)[TYPESAFE_STORE_KEY] as TypeSafeReviewStore;
+		const context = { cwd: "/tmp", mode: "tui", ui: { notify() {}, setStatus() {} } };
+		const blocked = await toolCall({ toolName: "exec_command", input: { cmd: "rm inflight-target" } }, context) as { block: boolean; reason: string };
+		assert.equal(blocked.block, true);
+		assert.equal(transport.calls.length, 1);
+		assert.ok(release);
+
+		await harness.commands.get("infra-guard-typesafe")!.handler("pause 10m", { hasUI: true, mode: "tui", ui: { notify() {}, setStatus() {}, async select() { return undefined; } } });
+		assert.equal(aborted, 1, "pausing aborts the in-flight request");
+		assert.equal(store.size(), 0);
+
+		const requestId = blocked.reason.match(/Approval request: ([^\n]+)/)?.[1]!;
+		const reason = blocked.reason.match(/^BLOCKED — ([^\n]+)/)?.[1]!;
+		const approve = harness.tools.find((tool) => tool.name === "approve_infra_command")!;
+		const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text };
+		const renderApproval = async (command: string, pendingId: string, pendingReason: string) => {
+			let rendered = "";
+			const result = await approve.execute(
+				"approve-inflight",
+				{ request_id: pendingId, command, reason: pendingReason, summary: "s", flags: [], blastRadius: "b" },
+				new AbortController().signal,
+				undefined,
+				{
+					...context,
+					ui: {
+						...context.ui,
+						async custom(factory: (...args: any[]) => { render(width: number): string[]; handleInput(data: string): void }) {
+							let choice = "cancel";
+							const overlay = factory({ requestRender() {}, terminal: { rows: 80 } }, theme, { matches: () => false }, (selected: string) => { choice = selected; });
+							rendered = overlay.render(160).join(" ").replace(/\s+/g, " ");
+							overlay.handleInput("n");
+							return choice;
+						},
+						async select() { return undefined; },
+					},
+				},
+			);
+			return { rendered, result };
+		};
+		const paused = await renderApproval("rm inflight-target", requestId, reason);
+		assert.doesNotMatch(paused.rendered, /TypeSafe/, "a paused review shows nothing, not a stale result");
+		assert.equal(paused.result.details.approved, false);
+
+		// A command blocked while paused has no review; after resuming, the overlay says so
+		// instead of starting a request from the approval tool.
+		const blockedWhilePaused = await toolCall({ toolName: "exec_command", input: { cmd: "rm blocked-while-paused" } }, context) as { reason: string };
+		assert.equal(transport.calls.length, 1);
+		store.pause.resume();
+		const resumed = await renderApproval(
+			"rm blocked-while-paused",
+			blockedWhilePaused.reason.match(/Approval request: ([^\n]+)/)?.[1]!,
+			blockedWhilePaused.reason.match(/^BLOCKED — ([^\n]+)/)?.[1]!,
+		);
+		assert.match(resumed.rendered, /Not consulted: TypeSafe review was disabled, paused, or unavailable when this command was blocked/);
+		assert.equal(transport.calls.length, 1, "the approval tool never starts a request on its own");
+
+		for (const handler of harness.handlers.get("session_shutdown") ?? []) await handler({}, {});
+		assert.equal((harness.pi.events as Record<PropertyKey, unknown>)[TYPESAFE_STORE_KEY], undefined);
+	});
 });

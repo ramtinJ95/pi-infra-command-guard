@@ -163,7 +163,7 @@ Ordinary `find` searches and `rsync` transfers without deletion flags are allowe
    - a structured summary of what the command does
    - important flags/options and what they change
    - the concrete blast radius
-3. Pi opens a scrollable overlay with one consistent layout: command, guard reason, summary, flags/options, blast radius, then `Cancel` / `Approve and run`.
+3. Pi opens a scrollable overlay with one consistent layout: command, guard reason, an optional separately labelled TypeSafe advisory (see below), summary, flags/options, blast radius, then `Cancel` / `Approve and run`.
 4. If approved, the extension records a one-time approval for that exact execution context.
 5. The model retries the exact same shell call; the guard consumes the approval and runs it.
 
@@ -196,6 +196,80 @@ Bypass rules apply uniformly to the `bash` tool, direct `exec_command` calls, an
 
 > [!WARNING]
 > Pauses and bypasses deliberately weaken the guard. A pause exposes every guarded tool. A kubeconfig-scoped bypass exposes every bypassable guarded kubectl operation that explicitly uses that kubeconfig from the selected repository subtree, which may include multiple contexts, clusters, namespaces, and resources. A command-prefix bypass covers every trailing argument under its prefix. Prefer the narrowest scope and shortest duration that covers the task.
+
+## TypeSafe review (experimental)
+
+> [!NOTE]
+> This feature is experimental, off by default, and requires a TypeSafe account. Most users can ignore it; with `integrations.typesafe.enabled` omitted or `false` the guard makes no network requests and needs no credentials.
+
+When enabled, the guard asks [TypeSafe](https://docs.typesafe.ai) one bounded question after it has already blocked a command for a **positively recognized risk** (for example `rm`, `kubectl delete`, `terraform apply`, `vault read`): does the reason identify an operation or effect actually present in executable shell code? Confirmation requirements and allowlist membership are supplied policy, not claims for the model to challenge. One matching operation suffices in a compound command; command-looking text passed to `echo`, `printf`, or `grep` is not execution. The answer is one of four verdicts and is shown in the approval overlay in its own section, `TypeSafe review — experimental, advisory only`, below the guard reason:
+
+- `Supported` — the reason identifies an executable operation or effect
+- `Partially supported` — the operation is present but an effect claim is partly inaccurate
+- `Mismatched` — the reason may not describe this command; the deterministic block still stands
+- `Insufficient evidence` — the command text alone does not show whether the reason applies
+
+The verdict is advisory. It never changes a block, never grants or infers approval, never weakens the exact-command and execution-context binding of one-time approvals, and never generates a replacement reason. The human still decides in the same overlay with the same choices. TypeSafe is not consulted for allowed commands, for blocks based on classification uncertainty, for custom `requireApproval` rules, for interactive-TTY blocks, for retries of an approved command, or outside TUI mode; the overlay says `Not consulted` in those cases when the review is enabled.
+
+Each verdict is shown with the full probability distribution and TypeSafe's `confidence`. Confidence measures how concentrated that distribution is, not whether the verdict is correct. When confidence is below 0.5 the verdict is labelled `unclear — options are close`. A `Supported` verdict does not prove the command is safe, and a `Mismatched` verdict does not prove it is safe either; it only suggests the guard's stated reason may not fit and the command deserves a closer look.
+
+### Setup
+
+1. Create a TypeSafe API key and export it in the environment Pi starts from:
+
+   ```bash
+   export TYPESAFE_API_KEY="..."
+   ```
+
+   `TYPESAFE_BASE_URL` is honoured for proxies; it defaults to `https://api.typesafe.ai`.
+
+2. Enable the review either by running `/infra-guard-typesafe enable` in Pi or by editing `infra-command-guard.json`:
+
+   ```json
+   {
+     "integrations": {
+       "typesafe": {
+         "enabled": true,
+         "timeoutMs": 8000
+       }
+     }
+   }
+   ```
+
+   `timeoutMs` is the per-request timeout (1000–30000, default 8000). There are no retries.
+
+If the review is enabled without `TYPESAFE_API_KEY`, the guard keeps working normally: the first known-risk block shows a warning and the overlay reports `Not available: TYPESAFE_API_KEY is not set`. No request is attempted.
+
+### Controls
+
+`/infra-guard-typesafe` manages the review independently of the guard itself. Without arguments it opens a menu in the TUI; the same actions are available as arguments:
+
+| Command | Effect | Persistence |
+| --- | --- | --- |
+| `/infra-guard-typesafe status` | Show enabled/disabled state, pause remaining, and whether credentials are present | — |
+| `/infra-guard-typesafe enable` | Set `integrations.typesafe.enabled` to `true` | Written to `infra-command-guard.json`, other fields preserved |
+| `/infra-guard-typesafe pause 1h` | Stop requests for 10 minutes, 30 minutes, or 1 hour (`10m`, `30m`, `1h`, or the full label) | Session only, shown in the status line, never written to disk |
+| `/infra-guard-typesafe resume` | End a pause early | — |
+| `/infra-guard-typesafe disable` | Set `integrations.typesafe.enabled` to `false` and drop pending reviews | Written to `infra-command-guard.json` |
+
+Pausing or disabling the review never pauses the guard; `/infra-guard` remains the only guard-wide off switch. Pausing or disabling aborts in-flight requests and discards their results, so a judgment requested before the pause is never shown after it. A command blocked while the review was paused or disabled is not retroactively reviewed; run it again after resuming. The command refuses to rewrite a configuration file it cannot parse.
+
+### What is sent to TypeSafe
+
+Only when a known-risk block is created in TUI mode, the guard sends one `POST https://api.typesafe.ai/v1/systemone` request containing:
+
+- the exact blocked command text, after deterministic redaction of recognizable credential material: values of options and environment assignments named like `token`, `password`, `secret`, `api-key`, `access-key`, `private-key`, `client-secret`, `credentials`, or `authorization`; `Bearer`/`Basic` header values; Vault, GitHub, Slack, and AWS access-key identifiers; and JWT-shaped tokens. Everything else in the command is sent verbatim, including paths, hostnames, resource names, and any secret that does not match those patterns. The overlay reports how many values were redacted.
+- the deterministic guard reason text
+- a fixed instruction describing the question and stating that the block stands regardless of the answer
+
+The working directory, environment variables, tool output, session content, and approval request identifier are not sent. Reviews are cached in memory for ten minutes per exact command and reason, so re-blocking an identical command does not send another request; a different command or reason always does. Each request costs TypeSafe tokens.
+
+### Limitations
+
+- TypeSafe compares the reason text with the command text. It has no view of the filesystem, cluster, cloud account, aliases, or scripts, so it cannot see risks the lexical policy misses and cannot verify that a command is safe.
+- The first request after a block runs in the background; the approval tool waits for it up to `timeoutMs` before opening the overlay. Failures, timeouts, and malformed responses are shown in the overlay and as a Pi warning, and the normal approval flow continues.
+- Invalid configuration disables the review along with the other fail-safe defaults.
+- The integration uses the documented HTTP API with model `jev-latest` directly; no SDK is bundled.
 
 ## Code Mode integration
 
@@ -271,6 +345,10 @@ Enabled guards can customize individual commands:
 Rules omit the executable and match case-sensitive normalized argument prefixes. Executable paths and recognized wrappers such as `sudo` and `env` are ignored. Known non-command global CLI options are removed wherever they occur before matching, while command-specific flags, arguments, and command-like `--help`/`--version` options retain their order. `*` matches characters within one token and never crosses whitespace. For example, `delete pod dev-*` matches `sudo kubectl --context production delete pod dev-api --wait=false`, but not `kubectl delete pod production-api`. Because rules are prefixes, every trailing argument is also covered by the match; use `requireApproval` for narrower exceptions that must remain guarded.
 
 Overrides apply only after the shell invocation has been parsed. They do not bypass interactive-session, rsync executable-option, `kubectl --raw`, Helm post-renderer, or invocation-local Git alias restrictions. Dynamic executable, opaque shell-runner, unsupported shell syntax, and `gcloud --flags-file` uncertainty remains non-bypassable by an `allow` rule but is allowed when `guardUnclassifiedCommands` is `false`. Changing command rules also invalidates pending requests and unused approvals. Invalid rules are ignored together with the rest of the invalid configuration, leaving every guard enabled under its built-in policy.
+
+### TypeSafe review
+
+`integrations.typesafe` enables the experimental advisory review described in [TypeSafe review (experimental)](#typesafe-review-experimental). It defaults to `{ "enabled": false, "timeoutMs": 8000 }`; `/infra-guard-typesafe enable` and `disable` edit only this field.
 
 ### Approval notifications and sound
 
@@ -365,6 +443,7 @@ Version 0.2.0 replaces the 0.1.x `PI_INFRA_COMMAND_GUARD_SOUND_PATH` and `PI_INF
 - The model supplies structured fields rather than a markdown blob, so the UI avoids repeating command/reason/blast-radius text.
 - Because it overrides the built-in `bash` tool, pi may show the standard override warning in interactive mode.
 - No notification setting is required; notifications and sound are opt-in.
+- The TypeSafe review is opt-in, advisory only, and makes network requests only after a known-risk block while enabled and not paused.
 
 ## Reload
 

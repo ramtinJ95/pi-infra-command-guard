@@ -50,6 +50,10 @@ Use this shape:
   "integrations": {
     "herdr": {
       "enabled": true
+    },
+    "typesafe": {
+      "enabled": false,
+      "timeoutMs": 8000
     }
   },
   "sound": {
@@ -116,6 +120,8 @@ Notification backends:
 
 Herdr panes do not pass raw terminal notification sequences to the outer terminal. `integrations.herdr.enabled` defaults to `true`; inside a Herdr pane, `auto` uses native delivery and explicit `terminal` calls `herdr notification show`. Herdr's own `[ui.toast].delivery` must allow the broker request. Herdr currently reuses one Kitty notification identifier, so repeated terminal notifications can update without a fresh banner; recommend `auto` or `native` for reliable attention. Do not mutate Herdr's configuration automatically.
 
+`integrations.typesafe` is an experimental, advisory-only review and defaults to `enabled: false`. When a user asks to turn it on or off, prefer telling them to run `/infra-guard-typesafe enable` or `disable`, which edit only that field; editing the JSON directly is equivalent. It requires `TYPESAFE_API_KEY` in Pi's environment and sends the redacted blocked command and guard reason to TypeSafe only after a block based on a positively recognized risk. Explain that the verdict never changes a block or approval, that pauses via `/infra-guard-typesafe pause` are session-only, and that `timeoutMs` must be an integer between 1000 and 30000. Do not add the field for users who have not asked for it.
+
 Sound is independent of notification delivery. Set `sound.enabled` to `true` and `sound.path` to a user-owned audio file. `~` is expanded, and relative paths resolve from the directory containing the JSON file. The package ships no sound files.
 
 Configuration is read for every shell command and approval request, so changes apply without `/reload`. Invalid JSON, unknown fields, unsupported values, and enabled sound without a path produce a visible Pi warning, keep every command guard enabled, and disable attention mechanisms for that request.
@@ -136,12 +142,13 @@ After editing the file, have the user run `/infra-guard-notify-test`. Terminal p
 - `bypass.ts`: session-scoped pauses, cwd/environment/prefix bypass scopes, and bypass-offer extraction
 - `approval-ui.ts`: structured approval overlay
 - `code-mode.ts`: optional dynamic adapter for pi-codex-conversion's published nested-tool preflight API
+- `typesafe.ts`: experimental advisory review of known-risk blocks — TypeSafe HTTP client, credential redaction, per-block review cache with the review pause, overlay advisory text, and `integrations.typesafe.enabled` persistence
 - `guarded-executables.ts`: canonical guarded executable names shared by scanning and policy dispatch
 - `index.ts`: Pi hooks, tools, commands, and lifecycle composition
 
 Keep tool-specific policy out of `shell.ts`. Add an executable name in `guarded-executables.ts`, implement its rules in `tool-policies.ts`, and register its evaluator in `policy.ts`; the typed registry fails type-checking when a guarded executable has no evaluator. Global `Symbol.for(...)` keys are reload compatibility boundaries and must remain byte-for-byte stable.
 
-Tests mirror module ownership (`attention.test.ts`, `shell.test.ts`, `policy.test.ts`, `command-policy-corpus.test.ts`, `approvals.test.ts`, `approval-ui.test.ts`, `bypass.test.ts`, and `code-mode.test.ts`). Keep cross-module Pi lifecycle coverage in `extension.test.ts`. `index.test.ts` is only the aggregate runner; do not restore a production `_test` export to reach internals. Shell fuzzing must be deterministic so CI failures are reproducible.
+Tests mirror module ownership (`attention.test.ts`, `shell.test.ts`, `policy.test.ts`, `command-policy-corpus.test.ts`, `approvals.test.ts`, `approval-ui.test.ts`, `bypass.test.ts`, `code-mode.test.ts`, and `typesafe.test.ts`). Keep cross-module Pi lifecycle coverage in `extension.test.ts`. `index.test.ts` is only the aggregate runner; do not restore a production `_test` export to reach internals. Shell fuzzing must be deterministic so CI failures are reproducible.
 
 ### Checks
 
@@ -150,6 +157,7 @@ Tests mirror module ownership (`attention.test.ts`, `shell.test.ts`, `policy.tes
 - Preserve the block → structured TUI approval → exact one-time retry flow.
 - Pauses and scoped bypasses are session-scoped, in-memory, and TUI-only. They must never persist to disk or be creatable by the agent. A pause is the operator-controlled full off switch and deliberately bypasses command policy and non-bypassable tool risks, but never the interactive-TTY compatibility block. Scoped bypasses must never bypass interactive-TTY blocks, non-bypassable tool risks, or another guarded operation in a compound command. Bypass rules always include the working-directory scope. An explicit, unambiguous kubectl `--kubeconfig` creates a kubeconfig-wide scope for bypassable kubectl operations in that directory subtree; ambiguous, dynamic, or cwd-uncertain forms receive no bypass offer, and other rules retain normalized command-prefix scope. Changing pause or bypass state invalidates pending and unused one-time approvals.
 - Notification failures must never approve, execute, or suppress a blocked command.
+- The TypeSafe review is advisory only. It runs solely after `guardExecution` returns a pending block with `basis: "knownRisk"` in TUI mode, never for allowed, unclassified, custom-rule, interactive-TTY, or non-TUI decisions, and never on the approved retry. It must never change a decision, create or consume an approval, or alter the approval binding. Render it in its own labelled overlay section, keep failures visible, and never inject TypeSafe requests into the every-command path. `enable`/`disable` persist through `persistTypeSafeEnabled`; the review pause is session-only like guard pauses. Redact credential material before sending and mock the transport in tests; never send live commands or make paid requests from the test suite.
 - Keep terminal protocols explicit: Kitty uses OSC 99; Ghostty uses OSC 9. Do not send guessed control sequences to unknown terminals.
 - Keep the extension silent by default and do not bundle third-party audio.
 

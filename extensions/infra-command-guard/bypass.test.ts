@@ -3,10 +3,12 @@ import { homedir } from "node:os";
 import { sep } from "node:path";
 import {
 	GuardBypassStore,
+	TimedPause,
 	describeBypassScope,
 	expandHomePath,
 	findMatchingBypassRule,
 	isPathWithin,
+	parseDurationArgument,
 } from "./bypass.ts";
 import { DEFAULT_COMMAND_POLICY_SETTINGS } from "./guarded-executables.ts";
 import { ApprovalStore, executionIdentity, guardExecution } from "./approvals.ts";
@@ -289,4 +291,33 @@ test("bypass store describe reports active pause and rules", () => {
 		describeBypassScope("kubectl", { kind: "kubectl-kubeconfig", path: "/tmp/kc" }),
 		"all guarded kubectl commands using kubeconfig /tmp/kc",
 	);
+});
+
+test("TimedPause expires, resumes early, and reports remaining time", () => {
+	let now = 1_000;
+	const pause = new TimedPause(() => now);
+	assert.equal(pause.isPaused(), false);
+	assert.equal(pause.remainingMs(), undefined);
+	pause.pause(60_000);
+	assert.equal(pause.isPaused(), true);
+	now += 15_000;
+	assert.equal(pause.remainingMs(), 45_000);
+	pause.resume();
+	assert.equal(pause.isPaused(), false);
+	pause.pause(60_000);
+	now += 60_000;
+	assert.equal(pause.isPaused(), false);
+	assert.equal(pause.remainingMs(), undefined);
+});
+
+test("parseDurationArgument accepts only the documented pause durations", () => {
+	assert.equal(parseDurationArgument("10 minutes"), 10 * 60_000);
+	assert.equal(parseDurationArgument("30m"), 30 * 60_000);
+	assert.equal(parseDurationArgument("1 Hour"), 60 * 60_000);
+	assert.equal(parseDurationArgument("1h"), 60 * 60_000);
+	assert.equal(parseDurationArgument("60 min"), 60 * 60_000);
+	assert.equal(parseDurationArgument("2h"), undefined);
+	assert.equal(parseDurationArgument("15m"), undefined);
+	assert.equal(parseDurationArgument("forever"), undefined);
+	assert.equal(parseDurationArgument(""), undefined);
 });

@@ -12,6 +12,7 @@ import {
 	type CommandPolicySettings,
 	type GuardSettings,
 } from "./guarded-executables.ts";
+import { DEFAULT_TYPESAFE_SETTINGS, parseTypeSafeSettings, type TypeSafeSettings } from "./typesafe.ts";
 
 const CONFIG_FILE_NAME = "infra-command-guard.json";
 
@@ -22,7 +23,7 @@ type AttentionContext = Pick<ExtensionContext, "ui"> | undefined;
 type ApprovalAttentionSettings = {
 	notifications: { enabled: boolean; backend: NotificationBackend };
 	sound: { enabled: boolean; path: string | null };
-	integrations: { herdr: { enabled: boolean } };
+	integrations: { herdr: { enabled: boolean }; typesafe: TypeSafeSettings };
 };
 type InfraCommandGuardSettings = ApprovalAttentionSettings & CommandPolicySettings;
 type MutableCommandPolicySettings = {
@@ -32,7 +33,7 @@ type MutableCommandPolicySettings = {
 const DEFAULT_ATTENTION_SETTINGS: ApprovalAttentionSettings = {
 	notifications: { enabled: false, backend: "auto" },
 	sound: { enabled: false, path: null },
-	integrations: { herdr: { enabled: true } },
+	integrations: { herdr: { enabled: true }, typesafe: DEFAULT_TYPESAFE_SETTINGS },
 };
 const DEFAULT_SETTINGS: InfraCommandGuardSettings = {
 	...DEFAULT_ATTENTION_SETTINGS,
@@ -82,7 +83,7 @@ function parseSettings(value: unknown, configPath: string): InfraCommandGuardSet
 	const settings: ApprovalAttentionSettings & MutableCommandPolicySettings = {
 		notifications: { ...DEFAULT_ATTENTION_SETTINGS.notifications },
 		sound: { ...DEFAULT_ATTENTION_SETTINGS.sound },
-		integrations: { herdr: { ...DEFAULT_ATTENTION_SETTINGS.integrations.herdr } },
+		integrations: { herdr: { ...DEFAULT_ATTENTION_SETTINGS.integrations.herdr }, typesafe: DEFAULT_TYPESAFE_SETTINGS },
 		guardUnclassifiedCommands: DEFAULT_COMMAND_POLICY_SETTINGS.guardUnclassifiedCommands,
 		guards,
 		commands: DEFAULT_COMMAND_OVERRIDES,
@@ -169,7 +170,8 @@ function parseSettings(value: unknown, configPath: string): InfraCommandGuardSet
 
 	if (value.integrations !== undefined) {
 		if (!isRecord(value.integrations)) throw new Error("integrations must be a JSON object");
-		assertKnownKeys(value.integrations, ["herdr"], "integrations");
+		assertKnownKeys(value.integrations, ["herdr", "typesafe"], "integrations");
+		settings.integrations.typesafe = parseTypeSafeSettings(value.integrations.typesafe);
 		if (value.integrations.herdr !== undefined) {
 			if (!isRecord(value.integrations.herdr)) throw new Error("integrations.herdr must be a JSON object");
 			assertKnownKeys(value.integrations.herdr, ["enabled"], "integrations.herdr");
@@ -202,7 +204,11 @@ function parseCommandOverrides(value: unknown, configPath: string): CommandOverr
 	return parseSettings(value, configPath).commands;
 }
 
-function loadSettings(configPath = join(getAgentDir(), CONFIG_FILE_NAME)): {
+function resolveConfigPath(): string {
+	return join(getAgentDir(), CONFIG_FILE_NAME);
+}
+
+function loadSettings(configPath = resolveConfigPath()): {
 	configPath: string;
 	settings: InfraCommandGuardSettings;
 	error?: string;
@@ -250,6 +256,27 @@ function loadPolicySettings(configPath = join(getAgentDir(), CONFIG_FILE_NAME)):
 			guards: loaded.settings.guards,
 			commands: loaded.settings.commands,
 		},
+		...(loaded.error ? { error: loaded.error } : {}),
+	};
+}
+
+// Single read for the per-command path: policy settings plus the TypeSafe toggle.
+function loadGuardConfiguration(configPath = resolveConfigPath()): {
+	configPath: string;
+	policy: CommandPolicySettings;
+	typesafe: TypeSafeSettings;
+	error?: string;
+} {
+	const loaded = loadSettings(configPath);
+	return {
+		configPath: loaded.configPath,
+		policy: {
+			guardUnclassifiedCommands: loaded.settings.guardUnclassifiedCommands,
+			guards: loaded.settings.guards,
+			commands: loaded.settings.commands,
+		},
+		// Invalid configuration fails safe for the review too: no API calls.
+		typesafe: loaded.error ? DEFAULT_TYPESAFE_SETTINGS : loaded.settings.integrations.typesafe,
 		...(loaded.error ? { error: loaded.error } : {}),
 	};
 }
@@ -534,8 +561,10 @@ export {
 	parseGuardSettings,
 	parseCommandOverrides,
 	loadApprovalAttentionSettings,
+	loadGuardConfiguration,
 	loadGuardSettings,
 	loadPolicySettings,
+	resolveConfigPath,
 	detectTerminalNotificationBackend,
 	autoNotificationBackend,
 	isHerdrPane,
