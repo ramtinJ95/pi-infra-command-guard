@@ -91,4 +91,21 @@ test("approval overlay renders an advisory in its own section after the guard re
 	rendered = "";
 	await requestInfraApproval(ctx, DETAILS, "guard reason text", "rm target");
 	assert.doesNotMatch(rendered, /TypeSafe/);
+
+	// Advisory text may originate from a remote service: control sequences are
+	// stripped and lines are bounded before rendering.
+	const esc = String.fromCharCode(0x1b);
+	const hostile = {
+		heading: `TypeSafe review${esc}[2J heading`,
+		lines: [
+			{ text: `Verdict: ${esc}[31mSupported${esc}[0m${esc}]0;owned${String.fromCharCode(0x07)} Model: ${"m".repeat(2_000)}`, style: "text" as const },
+		],
+	};
+	rendered = "";
+	await requestInfraApproval(ctx, DETAILS, "guard reason text", "rm target", undefined, hostile);
+	assert.doesNotMatch(rendered, new RegExp(esc));
+	const flattened = rendered.replace(/[│╭╮╰╯─]/g, " ").replace(/\s+/g, " ");
+	assert.match(flattened, /TypeSafe review heading/);
+	assert.match(flattened, /Verdict: Supported Model: [m ]+…/);
+	assert.ok(!flattened.replace(/ /g, "").includes("m".repeat(1_500)), "advisory lines are bounded");
 });

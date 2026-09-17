@@ -1,6 +1,10 @@
 import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type TUI } from "@earendil-works/pi-tui";
-import type { AdvisoryNote } from "./typesafe.ts";
+import { sanitizeExternalText, type AdvisoryNote } from "./typesafe.ts";
+
+// Advisory text can carry strings from a remote service; keep it printable and
+// bounded even if the caller already sanitized it.
+const MAX_ADVISORY_LINE_LENGTH = 1_000;
 
 type ApprovalDetails = {
 	summary: string;
@@ -197,9 +201,10 @@ class InfraApprovalOverlay {
 		if (this.advisory) {
 			// Advisory judgments render in their own labelled section so they are
 			// never mistaken for the deterministic guard reason above.
-			lines.push(this.theme.fg("muted", this.theme.bold(this.advisory.heading)));
+			lines.push(this.theme.fg("muted", this.theme.bold(sanitizeExternalText(this.advisory.heading, MAX_ADVISORY_LINE_LENGTH))));
 			for (const item of this.advisory.lines) {
-				lines.push(...wrapBlock(item.text, width).map((line) => this.theme.fg(item.style, line)));
+				const text = sanitizeExternalText(item.text, MAX_ADVISORY_LINE_LENGTH);
+				lines.push(...wrapBlock(text, width).map((line) => this.theme.fg(item.style, line)));
 			}
 			lines.push("");
 		}

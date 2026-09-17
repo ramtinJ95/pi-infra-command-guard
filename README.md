@@ -252,22 +252,27 @@ If the review is enabled without `TYPESAFE_API_KEY`, the guard keeps working nor
 | `/infra-guard-typesafe resume` | End a pause early | — |
 | `/infra-guard-typesafe disable` | Set `integrations.typesafe.enabled` to `false` and drop pending reviews | Written to `infra-command-guard.json` |
 
-Pausing or disabling the review never pauses the guard; `/infra-guard` remains the only guard-wide off switch. Pausing or disabling aborts in-flight requests and discards their results, so a judgment requested before the pause is never shown after it. A command blocked while the review was paused or disabled is not retroactively reviewed; run it again after resuming. The command refuses to rewrite a configuration file it cannot parse.
+Pausing or disabling the review never pauses the guard; `/infra-guard` remains the only guard-wide off switch. Pausing or disabling aborts in-flight requests and discards their results, so a judgment requested before the pause is never shown after it. A command blocked while the review was paused or disabled is not retroactively reviewed; run it again after resuming. The command refuses to rewrite a configuration file it cannot parse, and it replaces the file atomically through a temporary sibling with the original permissions, so a failed write leaves the existing file intact.
+
+Editing `integrations.typesafe` directly in the JSON is equivalent, with one difference in timing: the file is not watched. A change is observed the next time the guard reads configuration, which happens for every shell command, approval request, and `/infra-guard-typesafe` call. At that point a disabling or invalidating change aborts in-flight requests, discards cached reviews, and ends any session pause; any other change also discards cached reviews so nothing from the previous settings is shown or reused. If the file disables the review while the approval tool is already waiting for an answer, the answer is discarded and the overlay shows no TypeSafe section.
 
 ### What is sent to TypeSafe
 
 Only when a known-risk block is created in TUI mode, the guard sends one `POST https://api.typesafe.ai/v1/systemone` request containing:
 
-- the exact blocked command text, after deterministic redaction of recognizable credential material: values of options and environment assignments named like `token`, `password`, `secret`, `api-key`, `access-key`, `private-key`, `client-secret`, `credentials`, or `authorization`; `Bearer`/`Basic` header values; Vault, GitHub, Slack, and AWS access-key identifiers; and JWT-shaped tokens. Everything else in the command is sent verbatim, including paths, hostnames, resource names, and any secret that does not match those patterns. The overlay reports how many values were redacted.
-- the deterministic guard reason text
+- the exact blocked command text, after deterministic redaction of recognizable credential material. Redaction works on complete shell words: the value of any `NAME=value`, `--name=value`, or `--name value` word whose name (with any prefix, such as `GITHUB_TOKEN`, `PGPASSWORD`, `TF_VAR_db_password`, or `--secret-access-key`) contains `token`, `password`, `passwd`, `pwd`, `secret`, `api-key`, `access-key`, `private-key`, `credentials`, or `authorization` is replaced, including nested assignments such as `--from-literal=password=x`. Names that describe where a credential lives (`--token-file`, `--password-stdin`, `AWS_ACCESS_KEY_ID`) are left alone. `Bearer`/`Basic` header values; Vault, GitHub, Slack, and AWS access-key identifiers; and JWT-shaped tokens are redacted wherever they appear, and every redacted value is also hidden anywhere else it occurs in the command or reason. The placeholder `__REDACTED__` is a plain word, so the redacted command keeps its shell structure. Everything else in the command is sent verbatim, including paths, hostnames, resource names, short single-letter options such as `-p`, and any secret that does not match those rules. The overlay reports how many values were redacted.
+- the deterministic guard reason text, after the same redaction, because guard reasons can quote command words
 - a fixed instruction describing the question and stating that the block stands regardless of the answer
+
+If the command's quoting cannot be resolved (an unterminated quote, a trailing backslash, or an unclosed substitution), nothing is sent: the overlay shows `Not sent` with the cause and a Pi warning is raised, and the block proceeds normally.
 
 The working directory, environment variables, tool output, session content, and approval request identifier are not sent. Reviews are cached in memory for ten minutes per exact command and reason, so re-blocking an identical command does not send another request; a different command or reason always does. Each request costs TypeSafe tokens.
 
 ### Limitations
 
 - TypeSafe compares the reason text with the command text. It has no view of the filesystem, cluster, cloud account, aliases, or scripts, so it cannot see risks the lexical policy misses and cannot verify that a command is safe.
-- The first request after a block runs in the background; the approval tool waits for it up to `timeoutMs` before opening the overlay. Failures, timeouts, and malformed responses are shown in the overlay and as a Pi warning, and the normal approval flow continues.
+- The first request after a block runs in the background; the approval tool waits for it up to `timeoutMs` before opening the overlay. If the approval tool call is cancelled while waiting, it returns without notifying or opening the overlay, and the pending approval request stays valid for a fresh call. Failures, timeouts, and malformed responses are shown in the overlay and as a Pi warning, and the normal approval flow continues.
+- Model names and error details supplied by TypeSafe are stripped of terminal control sequences and bounded in length before they are shown in the overlay or a notification.
 - Invalid configuration disables the review along with the other fail-safe defaults.
 - The integration uses the documented HTTP API with model `jev-latest` directly; no SDK is bundled.
 

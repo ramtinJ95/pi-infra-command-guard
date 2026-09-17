@@ -1200,3 +1200,179 @@ test("pausing or disabling TypeSafe mid-flight discards the pending review", asy
 		assert.equal((harness.pi.events as Record<PropertyKey, unknown>)[TYPESAFE_STORE_KEY], undefined);
 	});
 });
+
+test("direct JSON edits disable and re-enable the TypeSafe review without reusing stale reviews", async () => {
+	await withAgentDir("infra-command-guard-typesafe-json-", async (_directory, configPath) => {
+		writeFileSync(configPath, JSON.stringify({ integrations: { typesafe: { enabled: true } } }));
+		let aborted = 0;
+		let pendingSignal: AbortSignal | null | undefined;
+		const transport = createTypeSafeTransport((_call, signal) => new Promise<Response>((resolve, reject) => {
+			pendingSignal = signal;
+			signal?.addEventListener("abort", () => {
+				aborted += 1;
+				reject(new Error("aborted"));
+			});
+			// Later calls resolve promptly; the first stays pending until aborted.
+			if (transport.calls.length > 1) resolve(jsonTypeSafeResponse(judgedTypeSafeBody("supported")));
+		}));
+		const harness = createHarness(createTestEventBus().facade(), { typeSafeTransport: transport });
+		const toolCall = harness.handlers.get("tool_call")![0]!;
+		const store = (harness.pi.events as Record<PropertyKey, unknown>)[TYPESAFE_STORE_KEY] as TypeSafeReviewStore;
+		const notifications: string[] = [];
+		const statuses: Array<string | undefined> = [];
+		const context = {
+			cwd: "/tmp",
+			mode: "tui",
+			ui: {
+				notify(message: string) { notifications.push(message); },
+				setStatus(_key: string, value: string | undefined) { statuses.push(value); },
+			},
+		};
+
+		const blocked = await toolCall({ toolName: "exec_command", input: { cmd: "rm json-target" } }, context) as { block: boolean; reason: string };
+		assert.equal(blocked.block, true);
+		assert.equal(transport.calls.length, 1);
+		assert.equal(store.size(), 1);
+		store.pause.pause(10 * 60 * 1000);
+
+		// Disabling directly in the JSON is observed on the next configuration read:
+		// the in-flight request is aborted, the cache emptied, and the pause ended.
+		writeFileSync(configPath, JSON.stringify({ integrations: { typesafe: { enabled: false } } }));
+		assert.equal(await toolCall({ toolName: "exec_command", input: { cmd: "git status" } }, context), undefined);
+		assert.equal(aborted, 1, "the in-flight review is aborted when the file disables the review");
+		assert.equal(store.size(), 0);
+		assert.equal(store.pause.isPaused(), false, "a JSON disable ends the session pause like /infra-guard-typesafe disable");
+		assert.ok(pendingSignal?.aborted);
+		const disabledOverlay = await approveBlocked(harness, "rm json-disabled-target", "n", { notifications });
+		assert.doesNotMatch(disabledOverlay.rendered, /TypeSafe/);
+		assert.equal(transport.calls.length, 1, "no request while disabled");
+		await harness.commands.get("infra-guard-typesafe")!.handler("status", { hasUI: false, mode: "rpc", ui: context.ui });
+		assert.match(notifications.at(-1)!, /TypeSafe review: disabled/);
+
+		// Re-enabling in the JSON starts fresh: the previously blocked command gets
+		// a new request rather than a stale review from the earlier enabled period.
+		writeFileSync(configPath, JSON.stringify({ integrations: { typesafe: { enabled: true } } }));
+		const reblocked = await approveBlocked(harness, "rm json-target", "y", { notifications });
+		assert.equal(transport.calls.length, 2, "the re-enabled review requests again");
+		assert.match(reblocked.rendered, /Verdict: Supported/);
+		assert.equal(reblocked.result.details.approved, true);
+
+		// A file that becomes invalid disables the review and drops cached reviews too.
+		await toolCall({ toolName: "exec_command", input: { cmd: "rm json-invalid-target" } }, context);
+		assert.equal(store.size(), 2, "the re-enabled review and the new block are cached");
+		writeFileSync(configPath, "{ broken");
+		await toolCall({ toolName: "exec_command", input: { cmd: "git status" } }, context);
+		assert.equal(store.size(), 0);
+		assert.equal(transport.calls.length, 3);
+	});
+});
+
+test("a disable observed while the approval tool waits hides the finished review", async () => {
+	await withAgentDir("infra-command-guard-typesafe-await-", async (_directory, configPath) => {
+		writeFileSync(configPath, JSON.stringify({ integrations: { typesafe: { enabled: true } } }));
+		// The review only completes after the JSON has disabled the integration.
+		const transport = createTypeSafeTransport(() => {
+			writeFileSync(configPath, JSON.stringify({ integrations: { typesafe: { enabled: false } } }));
+			return jsonTypeSafeResponse(judgedTypeSafeBody("mismatched"));
+		});
+		const harness = createHarness(createTestEventBus().facade(), { typeSafeTransport: transport });
+		const approved = await approveBlocked(harness, "rm await-target", "y");
+		assert.equal(transport.calls.length, 1);
+		assert.doesNotMatch(approved.rendered, /TypeSafe|Mismatched/, "settings are re-read after the wait");
+		assert.equal(approved.result.details.approved, true);
+	});
+});
+
+test("a cancelled approval tool call neither notifies nor opens the overlay, and the request survives", async () => {
+	await withAgentDir("infra-command-guard-typesafe-cancel-", async (_directory, configPath) => {
+		writeFileSync(configPath, JSON.stringify({ integrations: { typesafe: { enabled: true } } }));
+		let release: ((response: Response) => void) | undefined;
+		const transport = createTypeSafeTransport(() => new Promise<Response>((resolve) => { release = resolve; }));
+		const harness = createHarness(createTestEventBus().facade(), { typeSafeTransport: transport });
+		const toolCall = harness.handlers.get("tool_call")![0]!;
+		const notifications: string[] = [];
+		let overlays = 0;
+		const context = { cwd: "/tmp", mode: "tui", ui: { notify(message: string) { notifications.push(message); }, setStatus() {} } };
+		const blocked = await toolCall({ toolName: "exec_command", input: { cmd: "rm cancel-target" } }, context) as { block: boolean; reason: string };
+		assert.equal(blocked.block, true);
+		assert.ok(release, "the review is in flight");
+		const requestId = blocked.reason.match(/Approval request: ([^\n]+)/)?.[1]!;
+		const reason = blocked.reason.match(/^BLOCKED — ([^\n]+)/)?.[1]!;
+		const approve = harness.tools.find((tool) => tool.name === "approve_infra_command")!;
+		const params = { request_id: requestId, command: "rm cancel-target", reason, summary: "s", flags: [], blastRadius: "b" };
+		const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text };
+		const uiContext = (key: "y" | "n") => ({
+			...context,
+			ui: {
+				...context.ui,
+				async custom(factory: (...args: any[]) => { render(width: number): string[]; handleInput(data: string): void }) {
+					overlays += 1;
+					let choice = "cancel";
+					const overlay = factory({ requestRender() {}, terminal: { rows: 80 } }, theme, { matches: () => false }, (selected: string) => { choice = selected; });
+					overlay.render(160);
+					overlay.handleInput(key);
+					return choice;
+				},
+				async select() { return undefined; },
+			},
+		});
+
+		// Abort while the tool is still waiting on the unresolved review.
+		const controller = new AbortController();
+		const pendingResult = approve.execute("approve-cancel", params, controller.signal, undefined, uiContext("y"));
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		controller.abort();
+		const cancelled = await pendingResult;
+		assert.equal(cancelled.details.approved, false);
+		assert.match(cancelled.content[0]!.text, /cancelled before the user was asked/);
+		assert.equal(overlays, 0, "no overlay after cancellation");
+		assert.equal(notifications.length, 0, "no notification after cancellation");
+		assert.equal(transport.calls.length, 1, "the review request itself is left to settle");
+
+		// A signal that is already aborted returns before any wait.
+		const preAborted = new AbortController();
+		preAborted.abort();
+		const immediate = await approve.execute("approve-cancel", params, preAborted.signal, undefined, uiContext("y"));
+		assert.equal(immediate.details.approved, false);
+		assert.equal(overlays, 0);
+
+		// The pending request is still valid: a fresh, uncancelled call asks the user.
+		release!(jsonTypeSafeResponse(judgedTypeSafeBody("supported")));
+		const asked = await approve.execute("approve-cancel", params, new AbortController().signal, undefined, uiContext("y"));
+		assert.equal(overlays, 1);
+		assert.equal(asked.details.approved, true);
+		assert.equal(transport.calls.length, 1);
+	});
+});
+
+test("hostile TypeSafe responses cannot inject control sequences into the overlay or notifications", async () => {
+	await withAgentDir("infra-command-guard-typesafe-hostile-", async (_directory, configPath) => {
+		writeFileSync(configPath, JSON.stringify({ integrations: { typesafe: { enabled: true } } }));
+		const esc = String.fromCharCode(0x1b);
+		const bel = String.fromCharCode(0x07);
+		const escapePattern = new RegExp(`${esc}|${bel}`);
+
+		const hostileModel = createTypeSafeTransport(() => jsonTypeSafeResponse({
+			...(judgedTypeSafeBody("supported") as Record<string, unknown>),
+			model: `${esc}[2J${esc}]0;owned${bel}jev-evil`,
+		}));
+		const modelHarness = createHarness(createTestEventBus().facade(), { typeSafeTransport: hostileModel });
+		const modelNotifications: string[] = [];
+		const judged = await approveBlocked(modelHarness, "rm hostile-model-target", "y", { notifications: modelNotifications });
+		assert.doesNotMatch(judged.rendered, escapePattern);
+		assert.match(judged.rendered, /Model: jev-evil\./);
+		assert.equal(judged.result.details.approved, true);
+
+		const hostileDetail = createTypeSafeTransport(() => jsonTypeSafeResponse({ detail: `${esc}[31mInvalid${esc}[0m\rkey${"!".repeat(500)}` }, 401));
+		const detailHarness = createHarness(createTestEventBus().facade(), { typeSafeTransport: hostileDetail });
+		const detailNotifications: string[] = [];
+		const failed = await approveBlocked(detailHarness, "rm hostile-detail-target", "n", { notifications: detailNotifications });
+		assert.doesNotMatch(failed.rendered, escapePattern);
+		assert.match(failed.rendered, /Not available: TypeSafe request failed \(HTTP 401 \(check TYPESAFE_API_KEY\): Invalid key[! ]+…\)/);
+		const warning = detailNotifications.find((message) => /TypeSafe review failed/.test(message));
+		assert.ok(warning, detailNotifications.join("\n"));
+		assert.doesNotMatch(warning!, new RegExp(`${esc}|${bel}|\r`));
+		assert.ok(warning!.length < 400, warning);
+		assert.equal(failed.result.details.approved, false);
+	});
+});

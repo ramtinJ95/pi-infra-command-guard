@@ -55,6 +55,27 @@ type ExtensionDependencies = {
 	typeSafeTransport?: ReviewTransport;
 };
 
+// Resolves with the promise's value, or with undefined as soon as `signal`
+// aborts. The underlying promise is left to settle on its own.
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T | undefined> {
+	if (!signal) return promise;
+	if (signal.aborted) return Promise.resolve(undefined);
+	return new Promise<T | undefined>((resolve, reject) => {
+		const onAbort = () => resolve(undefined);
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(error: unknown) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+	});
+}
+
 const ApproveInfraCommandParams = Type.Object({
 	request_id: Type.String({ description: "The approval request identifier from the blocked tool result." }),
 	command: Type.String({ description: "The exact blocked command, byte-for-byte. Do not edit or normalize." }),
@@ -100,8 +121,11 @@ export default function createExtension(pi: ExtensionAPI, dependencies: Extensio
 	};
 	let lastConfigWarning: string | undefined;
 	let lastGuardRevision: string | undefined;
+	let lastTypeSafeRevision: string | undefined;
 	// The TypeSafe toggle is read from the same file in the same pass as the
 	// policy settings, so no extra file read is added to the per-command path.
+	// Configuration is not watched: a direct JSON edit is observed the next time
+	// this runs (the next shell command, approval request, or slash command).
 	let currentTypeSafeSettings: TypeSafeSettings = DEFAULT_TYPESAFE_SETTINGS;
 	let currentConfigState: { configPath: string; error?: string | undefined } = { configPath: "" };
 	const currentPolicySettings = (context?: { ui?: ExtensionContext["ui"] }): CommandPolicySettings => {
@@ -113,6 +137,18 @@ export default function createExtension(pi: ExtensionAPI, dependencies: Extensio
 			currentApprovals().clear();
 		}
 		lastGuardRevision = revision;
+		// Any observed change to the TypeSafe settings (including the file becoming
+		// invalid) aborts in-flight reviews and forgets cached ones, so a review
+		// started under the previous settings is never shown or reused later. A
+		// disabling change also ends the session pause, as `disable` does.
+		const typeSafeRevision = `${loaded.error ? "invalid" : "valid"}:${JSON.stringify(loaded.typesafe)}`;
+		if (lastTypeSafeRevision !== undefined && typeSafeRevision !== lastTypeSafeRevision) {
+			const store = currentTypeSafe();
+			store.clear();
+			if (!loaded.typesafe.enabled) store.pause.resume();
+			syncBypassStatus(context);
+		}
+		lastTypeSafeRevision = typeSafeRevision;
 		if (!loaded.error) {
 			lastConfigWarning = undefined;
 			return loaded.policy;
@@ -158,22 +194,32 @@ export default function createExtension(pi: ExtensionAPI, dependencies: Extensio
 		currentTypeSafe().begin(command, guarded.policyReason, currentTypeSafeSettings, typeSafeTransport);
 	};
 	// Resolves the advisory for the approval overlay. Returns nothing when the
-	// review is disabled or paused now, including a pause that began in flight.
+	// review is disabled or paused now, including a pause or configuration change
+	// that happened while the review was in flight. Stops waiting as soon as the
+	// approval tool call is aborted; the review itself stays cached for a retry.
 	const typeSafeAdvisory = async (
 		pending: PendingApproval,
 		context: { ui?: ExtensionContext["ui"] } | undefined,
+		signal: AbortSignal | undefined,
 	): Promise<AdvisoryNote | undefined> => {
 		if (!typeSafeActive()) return undefined;
 		if (pending.basis !== "knownRisk") return skippedReviewAdvisory("not-known-risk");
 		const record = currentTypeSafe().lookup(pending.identity.command, pending.reason);
 		if (!record) return skippedReviewAdvisory("not-requested");
-		const outcome = await record.outcome;
+		const outcome = await untilAborted(record.outcome, signal);
+		if (outcome === undefined) return undefined;
+		// Re-read the file: it may have been disabled while we waited.
+		currentPolicySettings(context);
 		if (!typeSafeActive()) return undefined;
-		if (outcome.status === "failed" || outcome.status === "timed-out") {
+		if (outcome.status === "failed" || outcome.status === "timed-out" || outcome.status === "not-sent") {
 			warnTypeSafe(
 				context,
 				`infra-command-guard TypeSafe review ${
-					outcome.status === "failed" ? `failed: ${outcome.detail}` : `timed out after ${outcome.timeoutMs} ms`
+					outcome.status === "failed"
+						? `failed: ${outcome.detail}`
+						: outcome.status === "not-sent"
+							? `was not sent: ${outcome.detail}`
+							: `timed out after ${outcome.timeoutMs} ms`
 				}. The normal approval flow is unaffected.`,
 			);
 		}
@@ -445,7 +491,7 @@ export default function createExtension(pi: ExtensionAPI, dependencies: Extensio
 			"When using approve_infra_command, keep summary, flags, and blastRadius non-overlapping; the approval UI renders command and reason separately.",
 		],
 		parameters: ApproveInfraCommandParams,
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			currentPolicySettings(ctx);
 			const approvalStore = currentApprovals();
 			const validation = approvalStore.validate(params.request_id, params.command, params.reason);
@@ -455,6 +501,13 @@ export default function createExtension(pi: ExtensionAPI, dependencies: Extensio
 					details: { approved: false, requestId: params.request_id, reason: params.reason, command: params.command },
 				};
 			}
+			// A cancelled tool call must never notify the user or open the overlay.
+			// The pending request stays valid so a fresh call can still ask.
+			const cancelled = () => ({
+				content: [{ type: "text" as const, text: "Approval request cancelled before the user was asked. Do not retry the command." }],
+				details: { approved: false, requestId: validation.pending.id, reason: params.reason, command: params.command },
+			});
+			if (signal?.aborted) return cancelled();
 
 			if (ctx.mode !== "tui") {
 				return {
@@ -492,9 +545,11 @@ export default function createExtension(pi: ExtensionAPI, dependencies: Extensio
 				}
 				: { summary: params.summary, flags: params.flags, blastRadius: params.blastRadius };
 
-			// Bounded by the review's own timeout; failures surface in the overlay
-			// and never delay or replace the normal approval decision.
-			const advisory = await typeSafeAdvisory(validation.pending, ctx);
+			// Bounded by the review's own timeout and by this call's abort signal;
+			// failures surface in the overlay and never delay or replace the normal
+			// approval decision.
+			const advisory = await typeSafeAdvisory(validation.pending, ctx, signal);
+			if (signal?.aborted) return cancelled();
 			await requestApprovalAttention(ctx);
 			const approvalChoice = await requestInfraApproval(
 				ctx,
