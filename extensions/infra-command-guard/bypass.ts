@@ -60,11 +60,11 @@ type KubectlKubeconfigResult =
 	| { kind: "scope"; scope: KubeconfigScope };
 
 function formatDuration(durationMs: number): string {
-	const option = DURATION_OPTIONS.find((candidate) => candidate.value === durationMs);
-	if (option) return option.label;
 	const minutes = Math.max(1, Math.round(durationMs / 60000));
-	const rounded = DURATION_OPTIONS.find((candidate) => candidate.value === minutes * 60000);
-	if (rounded) return rounded.label;
+	if (minutes % 60 === 0) {
+		const hours = minutes / 60;
+		return `${hours} hour${hours === 1 ? "" : "s"}`;
+	}
 	return `${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
@@ -84,7 +84,7 @@ function isPathWithin(candidate: string, directory: string): boolean {
 }
 
 // A single expiring pause. Shared by the guard-wide pause and the TypeSafe
-// review pause so both use the same duration options and expiry semantics.
+// review pause so both use the same expiry semantics.
 class TimedPause {
 	private expiresAt: number | undefined;
 
@@ -109,15 +109,14 @@ class TimedPause {
 }
 
 function parseDurationArgument(value: string): number | undefined {
-	const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
-	if (!normalized) return undefined;
-	const labelled = DURATION_OPTIONS.find((option) => option.label === normalized);
-	if (labelled) return labelled.value;
-	const short = normalized.match(/^(\d+)\s*(m|min|mins|minutes?|h|hr|hours?)$/);
+	const short = value.trim().match(/^(\d+)\s*(m|min|mins|minutes?|h|hrs?|hours?)$/i);
 	if (!short) return undefined;
 	const amount = Number(short[1]);
-	const minutes = short[2].startsWith("h") ? amount * 60 : amount;
-	return DURATION_OPTIONS.find((option) => option.value === minutes * 60_000)?.value;
+	const durationMs = amount * (short[2].toLowerCase().startsWith("h") ? ONE_HOUR_MS : 60_000);
+	// Never accept a duration that can overflow the expiry timestamp.
+	return durationMs > 0 && Number.isSafeInteger(durationMs) && Number.isSafeInteger(Date.now() + durationMs)
+		? durationMs
+		: undefined;
 }
 
 class GuardBypassStore {

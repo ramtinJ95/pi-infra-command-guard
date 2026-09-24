@@ -177,7 +177,9 @@ Two session-scoped escape hatches exist for focused work. Both live in memory on
 
 ### Pausing the guard
 
-Run `/infra-guard` and choose `Pause guard…`, then pick 10 minutes, 30 minutes, or 1 hour. While paused, every guarded command runs without approval except interactive TTY shell/interpreter sessions, which stay blocked because their later input cannot be classified. This intentionally includes capabilities that scoped bypasses cannot cover, such as `kubectl --raw`; pausing is the operator-controlled full off switch for the selected duration. The same menu resumes the guard early, removes individual scoped bypasses, and clears multiple active exceptions together. Active pauses and bypasses are also shown in the Pi status line.
+Run `/infra-guard` and choose `Pause guard…`, then pick 10 minutes, 30 minutes, 1 hour, or `Custom duration…`. Custom durations accept a positive whole number of minutes or hours, such as `10min`, `30min`, `1hour`, `4hours`, `90m`, or `2h` (spaces are optional). Invalid or overflowing durations leave the guard unchanged. The pause expires automatically and is available only through the TUI, never persisted to configuration.
+
+While paused, every guarded command runs without approval except interactive TTY shell/interpreter sessions, which stay blocked because their later input cannot be classified. This intentionally includes capabilities that scoped bypasses cannot cover, such as `kubectl --raw`; pausing is the operator-controlled full off switch for the selected duration. The same menu resumes the guard early, removes individual scoped bypasses, and clears multiple active exceptions together. Active pauses and bypasses are also shown in the Pi status line.
 
 ### Scoped bypasses from the approval overlay
 

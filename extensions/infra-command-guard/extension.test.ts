@@ -333,6 +333,68 @@ test("infra-guard menu pauses, resumes, and removes individual bypasses without 
 	}
 });
 
+test("custom guard pauses validate input, clear approvals only on success, and remain TUI-only", async () => {
+	const { commands, pi } = createHarness(createTestEventBus().facade());
+	const command = commands.get("infra-guard")!;
+	const bypasses = (pi.events as unknown as Record<PropertyKey, unknown>)[BYPASS_STORE_KEY] as GuardBypassStore;
+	const approvals = (pi.events as unknown as Record<PropertyKey, unknown>)[APPROVAL_STORE_KEY] as ApprovalStore;
+	const notifications: string[] = [];
+	const statuses: Array<string | undefined> = [];
+	let input: string | undefined;
+	let selections: Array<string | undefined>;
+	const context = {
+		hasUI: true,
+		mode: "tui",
+		ui: {
+			async select(_title: string, options: string[]) {
+				const selected = selections.shift();
+				if (selected) assert.ok(options.includes(selected));
+				return selected;
+			},
+			async input() { return input; },
+			notify(message: string) { notifications.push(message); },
+			setStatus(_key: string, value: string | undefined) { statuses.push(value); },
+		},
+	};
+	const identity = executionIdentity("exec-command", { cmd: "rm custom-pause-target" }, "/tmp")!;
+	const pending = approvals.createPending(identity, "confirmation required");
+	for (input of [undefined, "", "0min", "-1hour", "nonsense", "99999999999999999999h"]) {
+		selections = ["Pause guard…", "Custom duration…"];
+		const before = notifications.length;
+		await command.handler("", context);
+		assert.equal(bypasses.isPaused(), false);
+		assert.equal(approvals.validate(pending.id, identity.command, pending.reason).ok, true);
+		if (input === undefined) assert.equal(notifications.length, before);
+		else assert.match(notifications.at(-1)!, /Invalid pause duration.*Guard unchanged/);
+	}
+	assert.equal(statuses.length, 0);
+	selections = ["Pause guard…", undefined];
+	await command.handler("", context);
+	assert.equal(bypasses.isPaused(), false);
+
+	input = "4hours";
+	for (const mode of [{ hasUI: true, mode: "rpc" }, { hasUI: false, mode: "tui" }]) {
+		selections = ["Pause guard…", "Custom duration…"];
+		await command.handler("", { ...context, ...mode });
+		assert.equal(selections.length, 2, "non-interactive calls never open the pause menu");
+		assert.equal(bypasses.isPaused(), false);
+	}
+
+	const granted = approvals.createPending(identity, "confirmation required");
+	assert.equal(approvals.approve(granted.id, identity.command, granted.reason).ok, true);
+	selections = ["Pause guard…", "Custom duration…"];
+	await command.handler("", context);
+	assert.equal(bypasses.isPaused(), true);
+	assert.equal(approvals.validate(pending.id, identity.command, pending.reason).ok, false);
+	assert.equal(approvals.consume(identity), false);
+	assert.match(notifications.at(-1)!, /paused for 4 hours/);
+	assert.match(statuses.at(-1)!, /paused for 4 hours/);
+	selections = ["Resume guard now"];
+	await command.handler("", context);
+	assert.equal(bypasses.isPaused(), false);
+	assert.equal(statuses.at(-1), undefined);
+});
+
 test("approval-overlay bypass keeps the blocked command cwd and does not leave a one-time grant", async () => {
 	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-bypass-flow-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -1094,6 +1156,9 @@ test("/infra-guard-typesafe enables, pauses, resumes, and disables the review in
 		await run("pause nonsense");
 		assert.match(notifications.at(-1)!, /Unknown pause duration "nonsense"/);
 		assert.equal(store.pause.isPaused(), false);
+		await run("pause 2h");
+		assert.match(notifications.at(-1)!, /Unknown pause duration "2h"/);
+		assert.equal(store.pause.isPaused(), false, "TypeSafe retains its preset-only durations");
 		await run("frobnicate");
 		assert.match(notifications.at(-1)!, /^Usage: \/infra-guard-typesafe/);
 

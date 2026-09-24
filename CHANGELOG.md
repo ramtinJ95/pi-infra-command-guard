@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `Custom duration…` to `/infra-guard` → `Pause guard…`, accepting positive whole-number minutes or hours such as `45min` or `4hours`. Pauses remain TUI-only, session-scoped, and automatically expire.
+
 ## [0.10.0] - 2026-09-17
 
 ### Added

@@ -7,6 +7,7 @@ import {
 	describeBypassScope,
 	expandHomePath,
 	findMatchingBypassRule,
+	formatDuration,
 	isPathWithin,
 	parseDurationArgument,
 } from "./bypass.ts";
@@ -310,14 +311,40 @@ test("TimedPause expires, resumes early, and reports remaining time", () => {
 	assert.equal(pause.remainingMs(), undefined);
 });
 
-test("parseDurationArgument accepts only the documented pause durations", () => {
+test("parseDurationArgument accepts presets and custom whole minutes or hours", () => {
 	assert.equal(parseDurationArgument("10 minutes"), 10 * 60_000);
 	assert.equal(parseDurationArgument("30m"), 30 * 60_000);
 	assert.equal(parseDurationArgument("1 Hour"), 60 * 60_000);
 	assert.equal(parseDurationArgument("1h"), 60 * 60_000);
 	assert.equal(parseDurationArgument("60 min"), 60 * 60_000);
-	assert.equal(parseDurationArgument("2h"), undefined);
-	assert.equal(parseDurationArgument("15m"), undefined);
-	assert.equal(parseDurationArgument("forever"), undefined);
-	assert.equal(parseDurationArgument(""), undefined);
+	for (const input of ["2h", "2hours", "2 hours", " 2 HRS "]) {
+		assert.equal(parseDurationArgument(input), 2 * 60 * 60_000, input);
+	}
+	for (const input of ["15m", "15min", "15mins", "15 minutes"]) {
+		assert.equal(parseDurationArgument(input), 15 * 60_000, input);
+	}
+	assert.equal(parseDurationArgument("10min"), 10 * 60_000);
+	assert.equal(parseDurationArgument("30min"), 30 * 60_000);
+	assert.equal(parseDurationArgument("1hour"), 60 * 60_000);
+	assert.equal(parseDurationArgument("48hours"), 48 * 60 * 60_000);
+	for (const input of ["", " ", "forever", "0h", "0min", "-2h", "1.5h", "2", "1h30m", "1e3h", "10min junk", "Infinityh", "999999999999999999999999hours"]) {
+		assert.equal(parseDurationArgument(input), undefined, input);
+	}
+});
+
+test("custom pauses describe hours and expire exactly at the selected duration", () => {
+	let now = 1_000;
+	const store = new GuardBypassStore(() => now);
+	const duration = parseDurationArgument("4hours")!;
+	store.pause(duration);
+	assert.deepEqual(store.describe(), ["Guard paused for 4 hours"]);
+	now += duration - 1;
+	assert.equal(store.isPaused(), true);
+	now += 1;
+	assert.equal(store.isPaused(), false);
+	assert.deepEqual(store.describe(), []);
+	assert.equal(formatDuration(60 * 60_000 - 10), "1 hour");
+	assert.equal(formatDuration(2 * 60 * 60_000 - 10), "2 hours");
+	assert.equal(formatDuration(90 * 60_000), "90 minutes");
+	assert.equal(formatDuration(60_000), "1 minute");
 });
