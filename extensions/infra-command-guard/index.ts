@@ -301,14 +301,23 @@ export default function createExtension(pi: ExtensionAPI, dependencies: Extensio
 				}
 				const duration = await ctx.ui.select(
 					"Pause infra-command-guard for…",
-					DURATION_OPTIONS.map((option) => option.label),
+					[...DURATION_OPTIONS.map((option) => option.label), "Custom duration…"],
 				);
-				const option = DURATION_OPTIONS.find((candidate) => candidate.label === duration);
-				if (!option) return;
-				bypassStore.pause(option.value);
+				let durationMs = DURATION_OPTIONS.find((candidate) => candidate.label === duration)?.value;
+				if (duration === "Custom duration…") {
+					const input = await ctx.ui.input("Pause guard — custom duration", "e.g. 10min, 30min, 1hour, 4hours");
+					if (input === undefined) return;
+					durationMs = parseDurationArgument(input);
+					if (durationMs === undefined) {
+						ctx.ui.notify("Invalid pause duration. Enter a positive whole number of minutes or hours, e.g. 45min or 4hours. Extremely large durations are not supported. Guard unchanged.", "warning");
+						return;
+					}
+				}
+				if (durationMs === undefined) return;
+				bypassStore.pause(durationMs);
 				currentApprovals().clear();
 				syncBypassStatus(ctx);
-				ctx.ui.notify(`infra-command-guard paused for ${option.label}.`, "warning");
+				ctx.ui.notify(`infra-command-guard paused for ${formatDuration(durationMs)}.`, "warning");
 				return;
 			}
 			const removal = removeOptions.find((option) => option.label === choice);
@@ -433,7 +442,7 @@ export default function createExtension(pi: ExtensionAPI, dependencies: Extensio
 				}
 				const durationArgument = rest.join(" ");
 				let durationMs = durationArgument ? parseDurationArgument(durationArgument) : undefined;
-				if (durationArgument && durationMs === undefined) {
+				if (durationArgument && !DURATION_OPTIONS.some((option) => option.value === durationMs)) {
 					ctx.ui.notify(`Unknown pause duration "${durationArgument}". ${TYPESAFE_USAGE}`, "warning");
 					return;
 				}
