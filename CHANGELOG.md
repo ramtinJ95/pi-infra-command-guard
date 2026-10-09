@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Requires Pi 1.1. The Pi peer ranges are now `^1.1.0`, and the optional `@howaboua/pi-codex-conversion` peer requires 3.0.43 or newer, its first release for Pi 1.x. Development and type-checking target Pi 1.1.0, conversion 3.0.47, and the TypeBox version Pi 1.1 ships.
+
 ## [0.10.0] - 2026-09-17
 
 ### Added

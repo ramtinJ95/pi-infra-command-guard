@@ -569,7 +569,7 @@ test("Code Mode preflight registrations switch safely across guard reloads", asy
 	broker.shutdown();
 });
 
-test("approval requests do not leak across Pi 0.84 extension instances", async () => {
+test("approval requests do not leak across Pi extension instances", async () => {
 	const bus = createTestEventBus();
 	const first = createHarness(bus.facade());
 	const firstToolCall = first.handlers.get("tool_call")![0]!;
