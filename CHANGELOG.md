@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Requires Pi 1.1. The Pi peer ranges are now `^1.1.0`, and the optional `@howaboua/pi-codex-conversion` peer requires 3.0.43 or newer, its first release for Pi 1.x. Development and type-checking target Pi 1.1.0, conversion 3.0.47, and the TypeBox version Pi 1.1 ships.
 
+### Fixed
+
+- Kept `approve_infra_command` declared to the model when Code Mode is active. It now uses Pi's `model-only` exposure; with the default `direct` exposure, Pi's built-in `codemode` in `only` mode and conversion 3.0.44 and newer hid it from the model and listed it as a deferred script tool.
+
 ## [0.10.0] - 2026-09-17
 
 ### Added

@@ -248,6 +248,15 @@ test("outer Code Mode calls fail closed when nested preflights are unavailable",
 	}
 });
 
+test("approval stays declared to the model while guarded bash keeps Pi's script contract", () => {
+	const { tools } = createHarness(createTestEventBus().facade());
+	const approve = tools.find((tool) => tool.name === "approve_infra_command")!;
+	assert.equal(approve.exposure, "model-only");
+	const bash = tools.find((tool) => tool.name === "bash")!;
+	assert.equal(bash.exposure, undefined);
+	assert.ok(bash.outputSchema, "codemode scripts resolve bash calls through its output schema");
+});
+
 test("infra-guard menu pauses, resumes, and removes individual bypasses without inert rows", async () => {
 	const directory = mkdtempSync(join(tmpdir(), "infra-command-guard-menu-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;

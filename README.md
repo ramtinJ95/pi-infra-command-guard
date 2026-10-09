@@ -284,6 +284,8 @@ The guard verifies that a compatible preflight broker is connected before every 
 
 This integration is validated with Pi 1.1.0 and `@howaboua/pi-codex-conversion` 3.0.47. On Pi 1.x it requires conversion 3.0.43 or newer. The conversion package is an optional peer: normal Pi `bash` and structured `exec_command` guarding continue to work when Code Mode is not installed.
 
+Pi's built-in `codemode` tool needs no separate integration. Its scripts call tools through `ctx.executeTool()`, which runs the guarded `bash` tool, so blocked commands reject inside the script with the usual approval instructions. `approve_infra_command` uses `model-only` exposure: it stays declared to the model and cannot be called from built-in or conversion Code Mode scripts, which hide the declarations of script-callable tools.
+
 ## Configuration
 
 Configure the extension in `~/.pi/agent/infra-command-guard.json`. When `PI_CODING_AGENT_DIR` overrides Pi's configuration directory, put `infra-command-guard.json` there instead. The extension reads the file for every shell command and approval request, so edits apply immediately without `/reload`.
