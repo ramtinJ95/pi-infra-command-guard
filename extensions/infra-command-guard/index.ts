@@ -484,6 +484,9 @@ export default function createExtension(pi: ExtensionAPI, dependencies: Extensio
 		description:
 			"Ask the user to approve one exact blocked infra or rm command with structured risk details.",
 		promptSnippet: "Ask the user to approve one exact blocked infra/rm command with structured risk details.",
+		// Asks the user, so it must stay declared to the model and out of script
+		// tool tables: Code Mode bridges hide the declarations of callable tools.
+		exposure: "model-only",
 		promptGuidelines: [
 			"Use approve_infra_command only after infra-command-guard blocks a shell command and explicitly instructs you to use it.",
 			"Pass the approval request identifier from that blocked shell result as request_id.",

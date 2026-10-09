@@ -71,7 +71,7 @@ function createBroker(pi: ReturnType<ReturnType<typeof createTestApis>>["pi"]) {
 }
 
 for (const order of ["broker-first", "guard-first"] as const) {
-	test(`Code Mode guard uses the published preflight API across Pi 0.84 event facades (${order})`, async () => {
+	test(`Code Mode guard uses the published preflight API across per-extension Pi event facades (${order})`, async () => {
 		const createPi = createTestApis();
 		const codeMode = createPi();
 		const guard = createPi();

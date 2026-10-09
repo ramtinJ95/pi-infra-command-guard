@@ -17,7 +17,7 @@ Global pi extension that wraps the built-in `bash` tool and intercepts direct an
 pi install npm:@ramtinj95/pi-infra-command-guard
 ```
 
-Then run `/reload` or restart Pi. Pi packages execute with full system access; review this extension before installation.
+Requires Pi 1.1 or newer. Then run `/reload` or restart Pi. Pi packages execute with full system access; review this extension before installation.
 
 ## Goals
 
@@ -282,7 +282,9 @@ The integration dynamically loads the official `@howaboua/pi-codex-conversion/co
 
 The guard verifies that a compatible preflight broker is connected before every outer `exec` or `wait`. If Code Mode is absent or too old to expose the supported API, the outer call is blocked instead of silently running unguarded. Other nested Code Mode tools pass through unchanged.
 
-This integration is validated with Pi 0.84.1 and `@howaboua/pi-codex-conversion` 3.0.12. Code Mode guarding requires conversion 3.0.11 or newer. The conversion package is an optional peer: normal Pi `bash` and structured `exec_command` guarding continue to work when Code Mode is not installed.
+This integration is validated with Pi 1.1.0 and `@howaboua/pi-codex-conversion` 3.0.47. On Pi 1.x it requires conversion 3.0.43 or newer. The conversion package is an optional peer: normal Pi `bash` and structured `exec_command` guarding continue to work when Code Mode is not installed.
+
+Pi's built-in `codemode` tool needs no separate integration. Its scripts call tools through `ctx.executeTool()`, which runs the guarded `bash` tool, so blocked commands reject inside the script with the usual approval instructions. `approve_infra_command` uses `model-only` exposure: it stays declared to the model and cannot be called from built-in or conversion Code Mode scripts, which hide the declarations of script-callable tools.
 
 ## Configuration
 
