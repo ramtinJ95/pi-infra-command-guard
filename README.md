@@ -1,4 +1,5 @@
 # infra-command-guard
+> **Moved:** this package now lives in [ramtinJ95/ramtin-pi-stuff](https://github.com/ramtinJ95/ramtin-pi-stuff/tree/main/packages/pi-infra-command-guard). This repository is archived; open issues and pull requests there.
 
 Global pi extension that wraps the built-in `bash` tool and intercepts direct and GPT-5.6 Code Mode `exec_command` calls, asking for approval before higher-risk infrastructure, cloud, and destructive local-file commands.
 
